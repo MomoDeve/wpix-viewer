@@ -16,8 +16,8 @@
         1001: 'CopyResource',
         1002: 'CopyTiles',
         1004: 'OMSetStencilRef',
-        1005: 'RSSetViewports',
-        1006: 'RSSetScissorRects',
+        1005: 'RSSetScissorRects',
+        1006: 'RSSetViewports',
         1007: 'OMSetBlendFactor',
         1008: 'SetPipelineState',
         1009: 'SetPipelineState',
@@ -534,30 +534,157 @@
         return inferredFenceByEvent;
     }
 
-    function buildRasterStateInfo(events) {
+    function buildRasterStateInfo(events, ctx) {
         const viewportHistoryByCommandList = new Map();
+        const scissorHistoryByCommandList = new Map();
+        const resourceInfo = ctx && ctx.resourceInfo;
         const sorted = [...(events || [])].sort((a, b) => {
             const aSeq = a.sequence != null ? a.sequence : 0;
             const bSeq = b.sequence != null ? b.sequence : 0;
             return aSeq - bSeq;
         });
 
-        for (const evt of sorted) {
-            if ((evt.opcode >>> 0) !== 1005 || !evt.viewportSet) continue;
+        const pushHistory = (map, commandListId, entry) => {
+            if (commandListId == null || !entry) return;
+            const list = map.get(commandListId) || [];
+            list.push(entry);
+            map.set(commandListId, list);
+        };
+
+        const inferViewportFromScissorRects = (rects) => {
+            if (!Array.isArray(rects) || rects.length !== 1) return null;
+            const rect = rects[0];
+            if (!rect) return null;
+            const width = rect.right - rect.left;
+            const height = rect.bottom - rect.top;
+            if (!Number.isFinite(width) || !Number.isFinite(height) || width < 0 || height < 0) return null;
+            return {
+                numViewports: 1,
+                viewports: [{
+                    topLeftX: rect.left,
+                    topLeftY: rect.top,
+                    width,
+                    height,
+                    minDepth: 0,
+                    maxDepth: 1,
+                }],
+                inferredFromScissor: true,
+            };
+        };
+
+        const getResource = (objectId) => {
+            if (!resourceInfo || objectId == null) return null;
+            if (typeof resourceInfo.get === 'function') return resourceInfo.get(objectId) || null;
+            return resourceInfo[objectId] || null;
+        };
+
+        const inferViewportFromRenderTarget = (startIndex, commandListId, sequence) => {
+            const maxSequenceDelta = 64;
+            let sawSingleRenderTargetBind = false;
+
+            for (let i = startIndex - 1; i >= 0; i--) {
+                const candidate = sorted[i];
+                if (!candidate) continue;
+                if (candidate.sequence != null && Math.abs(candidate.sequence - sequence) > maxSequenceDelta) break;
+                const candidateMeta = sanitizeMetaParams(candidate.metaParams);
+                if (candidateMeta[0] !== commandListId) continue;
+
+                if ((candidate.opcode >>> 0) === 1029 && candidateMeta[1] === 1) {
+                    sawSingleRenderTargetBind = true;
+                    continue;
+                }
+
+                if (!sawSingleRenderTargetBind || (candidate.opcode >>> 0) !== 1009 || !candidate.transitionBarriers || candidate.transitionBarriers.length !== 1) {
+                    continue;
+                }
+
+                const barrier = candidate.transitionBarriers[0];
+                if (!barrier || barrier.stateAfterRaw !== 4) continue;
+
+                const resource = getResource(barrier.resourceObjectId);
+                if (!resource || resource.dimension !== 'TEXTURE2D') continue;
+                if (!Number.isFinite(resource.width) || !Number.isFinite(resource.height)) continue;
+
+                return {
+                    numViewports: 1,
+                    viewports: [{
+                        topLeftX: 0,
+                        topLeftY: 0,
+                        width: resource.width,
+                        height: resource.height,
+                        minDepth: 0,
+                        maxDepth: 1,
+                    }],
+                    inferredFromRenderTarget: true,
+                    inferredResourceObjectId: barrier.resourceObjectId,
+                };
+            }
+
+            return null;
+        };
+
+        const findNearbyScissorRects = (startIndex, commandListId, sequence) => {
+            const maxSequenceDelta = 4;
+            let best = null;
+
+            const consider = (candidate) => {
+                if (!candidate || (candidate.opcode >>> 0) !== 1005 || !candidate.scissorRects || candidate.scissorRects.length === 0) {
+                    return;
+                }
+                const candidateMeta = sanitizeMetaParams(candidate.metaParams);
+                if (candidateMeta[0] !== commandListId || candidate.sequence == null) return;
+                const delta = Math.abs(candidate.sequence - sequence);
+                if (delta > maxSequenceDelta) return;
+                if (!best || delta < best.delta) {
+                    best = { delta, rects: candidate.scissorRects };
+                }
+            };
+
+            for (let i = startIndex - 1; i >= 0; i--) {
+                const candidate = sorted[i];
+                if (candidate.sequence != null && Math.abs(candidate.sequence - sequence) > maxSequenceDelta) break;
+                consider(candidate);
+            }
+            for (let i = startIndex + 1; i < sorted.length; i++) {
+                const candidate = sorted[i];
+                if (candidate.sequence != null && Math.abs(candidate.sequence - sequence) > maxSequenceDelta) break;
+                consider(candidate);
+            }
+
+            return best ? best.rects : null;
+        };
+
+        for (let i = 0; i < sorted.length; i++) {
+            const evt = sorted[i];
             const meta = sanitizeMetaParams(evt.metaParams);
-            const viewportSet = evt.viewportSet;
-            if (!viewportSet) continue;
             const commandListId = meta[0];
-            if (commandListId == null) continue;
-            const list = viewportHistoryByCommandList.get(commandListId) || [];
-            list.push({
+            if ((evt.opcode >>> 0) === 1005 && evt.scissorRects && evt.scissorRects.length > 0) {
+                pushHistory(scissorHistoryByCommandList, commandListId, {
+                    sequence: evt.sequence,
+                    scissorRects: evt.scissorRects,
+                });
+            }
+            if ((evt.opcode >>> 0) !== 1006) continue;
+
+            let viewportSet = evt.viewportSet || null;
+            if (!viewportSet) {
+                const nearbyRects = findNearbyScissorRects(i, commandListId, evt.sequence);
+                viewportSet = inferViewportFromScissorRects(nearbyRects);
+                if (viewportSet) evt.viewportSet = viewportSet;
+            }
+            if (!viewportSet) {
+                viewportSet = inferViewportFromRenderTarget(i, commandListId, evt.sequence);
+                if (viewportSet) evt.viewportSet = viewportSet;
+            }
+
+            if (!viewportSet || commandListId == null) continue;
+            pushHistory(viewportHistoryByCommandList, commandListId, {
                 sequence: evt.sequence,
                 viewportSet,
             });
-            viewportHistoryByCommandList.set(commandListId, list);
         }
 
-        return { viewportHistoryByCommandList };
+        return { viewportHistoryByCommandList, scissorHistoryByCommandList };
     }
 
     function buildBufferViewInfo(events, descriptorInfo) {
@@ -678,6 +805,120 @@
         return { labelsByKey, historyByCommandList };
     }
 
+    function buildDescriptorHeapSetInfo(events) {
+        const byEventKey = new Map();
+        const bySetId = new Map();
+        const sorted = [...(events || [])].sort((a, b) => {
+            const aSeq = a.sequence != null ? a.sequence : 0;
+            const bSeq = b.sequence != null ? b.sequence : 0;
+            return aSeq - bSeq;
+        });
+
+        for (let i = 0; i < sorted.length; i++) {
+            const evt = sorted[i];
+            if ((evt.opcode >>> 0) !== 1012) continue;
+
+            const meta = sanitizeMetaParams(evt.metaParams);
+            const commandListId = meta[0];
+            const setId = meta[1];
+            const heapIds = [];
+            const seen = new Set();
+
+            for (let j = i + 1; j < sorted.length; j++) {
+                const candidate = sorted[j];
+                const candidateMeta = sanitizeMetaParams(candidate.metaParams);
+                if (candidateMeta[0] !== commandListId) continue;
+                if ((candidate.opcode >>> 0) === 1012) break;
+
+                if (((candidate.opcode >>> 0) === 1015 || (candidate.opcode >>> 0) === 1016 || (candidate.opcode >>> 0) === 1014) && candidateMeta[2] != null) {
+                    const heapId = candidateMeta[2];
+                    if (!seen.has(heapId)) {
+                        seen.add(heapId);
+                        heapIds.push(heapId);
+                    }
+                }
+            }
+
+            const info = {
+                commandListId,
+                setId,
+                heapIds,
+            };
+            const key = eventKey(evt);
+            if (key) byEventKey.set(key, info);
+
+            if (setId != null) {
+                const existing = bySetId.get(setId) || { setId, heapIds: [] };
+                const merged = [...existing.heapIds];
+                for (const heapId of heapIds) {
+                    if (!merged.includes(heapId)) merged.push(heapId);
+                }
+                bySetId.set(setId, {
+                    setId,
+                    heapIds: merged,
+                });
+            }
+        }
+
+        return { byEventKey, bySetId };
+    }
+
+    function buildPixBundleInfo(events) {
+        const bundleByEventKey = new Map();
+        const executeByEventKey = new Map();
+        const sorted = [...(events || [])].sort((a, b) => {
+            const aSeq = a.sequence != null ? a.sequence : 0;
+            const bSeq = b.sequence != null ? b.sequence : 0;
+            return aSeq - bSeq;
+        });
+
+        let currentBundle = null;
+
+        for (const evt of sorted) {
+            const opcode = evt.opcode >>> 0;
+            const key = eventKey(evt);
+            if (!key) continue;
+
+            if (opcode === 2034) {
+                const meta = sanitizeMetaParams(evt.metaParams);
+                currentBundle = {
+                    recordId: evt.param1,
+                    info0: meta[0],
+                    info1: meta[1],
+                    linkedEventRecordId: meta[2],
+                    resourceObjectId: meta[3],
+                    info4: meta[4],
+                    executeCommandLists: [],
+                };
+                bundleByEventKey.set(key, currentBundle);
+                continue;
+            }
+
+            if (opcode !== 1065 || !currentBundle) continue;
+
+            const meta = sanitizeMetaParams(evt.metaParams);
+            const executeInfo = {
+                bundleRecordId: currentBundle.recordId,
+                resourceObjectId: currentBundle.resourceObjectId,
+                bundleInfo1: currentBundle.info1,
+                queueObjectId: meta[0],
+                numCommandLists: meta[1],
+                packedWord0: meta[2],
+                packedWord1: meta[3],
+                commandListIds: meta[1] === 1 && meta[4] != null ? [meta[4]] : [],
+            };
+            executeByEventKey.set(key, executeInfo);
+            currentBundle.executeCommandLists.push({
+                recordId: evt.param1,
+                queueObjectId: meta[0],
+                numCommandLists: meta[1],
+                commandListIds: executeInfo.commandListIds,
+            });
+        }
+
+        return { bundleByEventKey, executeByEventKey };
+    }
+
     function getEventByRecordId(ctx, recordId) {
         if (!ctx || recordId == null) return null;
         const source = ctx.eventDetailsByRecordId;
@@ -707,6 +948,34 @@
         if (!key) return null;
         if (typeof ctx.signalInfo.get === 'function') return ctx.signalInfo.get(key) || null;
         return ctx.signalInfo[key] || null;
+    }
+
+    function getDescriptorHeapSet(ctx, evt) {
+        if (!ctx || !ctx.descriptorHeapSetInfo || !evt) return null;
+        const key = eventKey(evt);
+        if (key && ctx.descriptorHeapSetInfo.byEventKey && typeof ctx.descriptorHeapSetInfo.byEventKey.get === 'function') {
+            const byEvent = ctx.descriptorHeapSetInfo.byEventKey.get(key);
+            if (byEvent) return byEvent;
+        }
+
+        const meta = sanitizeMetaParams(evt.metaParams);
+        const setId = meta[1];
+        if (setId == null || !ctx.descriptorHeapSetInfo.bySetId || typeof ctx.descriptorHeapSetInfo.bySetId.get !== 'function') return null;
+        return ctx.descriptorHeapSetInfo.bySetId.get(setId) || null;
+    }
+
+    function getPixBundleForEvent(ctx, evt) {
+        if (!ctx || !ctx.pixBundleInfo || !evt) return null;
+        const key = eventKey(evt);
+        if (!key || !ctx.pixBundleInfo.bundleByEventKey || typeof ctx.pixBundleInfo.bundleByEventKey.get !== 'function') return null;
+        return ctx.pixBundleInfo.bundleByEventKey.get(key) || null;
+    }
+
+    function getExecuteBundleInfo(ctx, evt) {
+        if (!ctx || !ctx.pixBundleInfo || !evt) return null;
+        const key = eventKey(evt);
+        if (!key || !ctx.pixBundleInfo.executeByEventKey || typeof ctx.pixBundleInfo.executeByEventKey.get !== 'function') return null;
+        return ctx.pixBundleInfo.executeByEventKey.get(key) || null;
     }
 
     function getDecodedCall(evt, ctx) {
@@ -1334,23 +1603,6 @@
                 return result('OMSetStencilRef', args, [], 'OMSetStencilRef(StencilRef:0)');
             case 1005:
                 {
-                    const viewportSet = evt.viewportSet || null;
-                    if (viewportSet) {
-                        pushArg(args, 'NumViewports', viewportSet.numViewports);
-                        pushArg(args, 'pViewports', viewportSet.viewports, formatPixViewportList(viewportSet.viewports));
-                        return result(
-                            'RSSetViewports',
-                            args,
-                            [],
-                            `RSSetViewports(NumViewports:${viewportSet.numViewports}, pViewports:${formatPixViewportList(viewportSet.viewports)})`,
-                        );
-                    }
-                    addCommonThisArg(args, meta, ctx);
-                    pushArg(args, 'NumViewports', a);
-                    return result('RSSetViewports', args, ['RSSetViewports is compacted in this capture; the exact viewport array is not yet decoded from the packed payload.']);
-                }
-            case 1006:
-                {
                     if (evt.scissorRects && evt.scissorRects.length > 0) {
                         pushArg(args, 'NumRects', evt.scissorRects.length);
                         pushArg(args, 'pRects', evt.scissorRects, formatPixRectList(evt.scissorRects));
@@ -1362,11 +1614,38 @@
                         );
                     }
                     addCommonThisArg(args, meta, ctx);
-                    pushArg(args, 'NumRects', a != null ? (a & 0xFF) || a : a);
-                    return result('RSSetScissorRects', args, ['RSSetScissorRects is compacted in this capture; the exact rect array is not yet decoded from the packed payload.']);
+                    pushArg(args, 'NumRects', evt.scissorRectCount != null ? evt.scissorRectCount : a);
+                    return result('RSSetScissorRects', args, ['RSSetScissorRects is compacted in this capture; the rect array was not fully recovered for this record.']);
+                }
+            case 1006:
+                {
+                    const viewportSet = evt.viewportSet || null;
+                    if (viewportSet) {
+                        pushArg(args, 'NumViewports', viewportSet.numViewports);
+                        pushArg(args, 'pViewports', viewportSet.viewports, formatPixViewportList(viewportSet.viewports));
+                        let notes = [];
+                        if (viewportSet.inferredFromScissor) {
+                            notes = ['Viewport dimensions were inferred from the matching single scissor rect because this capture stores RSSetViewports in PIX\'s compact full-target form.'];
+                        } else if (viewportSet.inferredFromRenderTarget) {
+                            notes = ['Viewport dimensions were inferred from the currently bound render-target resource because this compact RSSetViewports record only stores the full-target token.'];
+                        }
+                        return result(
+                            'RSSetViewports',
+                            args,
+                            notes,
+                            `RSSetViewports(NumViewports:${viewportSet.numViewports}, pViewports:${formatPixViewportList(viewportSet.viewports)})`,
+                        );
+                    }
+                    addCommonThisArg(args, meta, ctx);
+                    pushArg(args, 'NumViewports', evt.viewportCount != null ? evt.viewportCount : (a != null ? (a & 0xFF) || a : a));
+                    return result('RSSetViewports', args, ['RSSetViewports is stored in PIX\'s compact full-target form here; the exact viewport dimensions could not be proven from this record alone.']);
                 }
             case 1007:
                 addCommonThisArg(args, evt.coreMetaParams || meta, ctx);
+                if (evt.blendFactor) {
+                    pushArg(args, 'BlendFactor', evt.blendFactor, formatPixColorElements(evt.blendFactor));
+                    return result('OMSetBlendFactor', args, [], `OMSetBlendFactor(BlendFactor:${formatPixColorElements(evt.blendFactor)})`);
+                }
                 if ((evt.coreMetaParams || [])[1] === 0) {
                     pushArg(args, 'BlendFactor', [0, 0, 0, 0], '{Element:0, Element:0, Element:0, Element:0}');
                     return result('OMSetBlendFactor', args, [], 'OMSetBlendFactor(BlendFactor:{Element:0, Element:0, Element:0, Element:0})');
@@ -1409,6 +1688,19 @@
             case 1012:
                 addCommonThisArg(args, evt.coreMetaParams || meta, ctx);
                 if ((evt.coreMetaParams || [])[1] != null) pushArg(args, 'DescriptorHeapSetId', (evt.coreMetaParams || [])[1]);
+                {
+                    const heapSet = getDescriptorHeapSet(ctx, evt);
+                    if (heapSet && heapSet.heapIds && heapSet.heapIds.length > 0) {
+                        pushArg(args, 'NumDescriptorHeaps', heapSet.heapIds.length);
+                        pushArg(args, 'ppDescriptorHeaps', heapSet.heapIds, `{${heapSet.heapIds.map((heapId) => `Element:${formatObj(heapId, ctx)}`).join(', ')}}`);
+                        return result(
+                            name,
+                            args,
+                            ['Descriptor heap object ids were inferred from the descriptor-table heap bases used after this compact SetDescriptorHeaps record on the same command list. Unused bound heaps may still be absent from the observed set.'],
+                            `SetDescriptorHeaps(NumDescriptorHeaps:${heapSet.heapIds.length}, ppDescriptorHeaps:{${heapSet.heapIds.map((heapId) => `Element:${formatObj(heapId, ctx)}`).join(', ')}})`,
+                        );
+                    }
+                }
                 return result(name, args, ['SetDescriptorHeaps is compacted in this capture; the heap set is currently identified by PIX\'s packed set id rather than expanded per-heap object ids.']);
             case 1013:
             case 1014:
@@ -1649,10 +1941,30 @@
             case 1065:
                 addCommonThisArg(args, meta, ctx);
                 pushArg(args, 'NumCommandLists', a);
-                if (b != null) pushArg(args, 'CommandListData0', b, formatObj(b, ctx));
-                if (c != null) pushArg(args, 'CommandListData1', c);
-                if (d != null) pushArg(args, 'CommandListData2', d);
-                return result(name, args);
+                {
+                    const executeInfo = getExecuteBundleInfo(ctx, evt);
+                    const submittedCommandLists = executeInfo && executeInfo.commandListIds && executeInfo.commandListIds.length > 0
+                        ? executeInfo.commandListIds
+                        : (a === 1 && d != null ? [d] : []);
+                    if (submittedCommandLists.length > 0) {
+                        const display = `{${submittedCommandLists.map((id, index) => `Element_${index}:${formatObj(id, ctx)}`).join(', ')}}`;
+                        pushArg(args, 'ppCommandLists', submittedCommandLists, display);
+                        const notes = ['This ExecuteCommandLists record stores a compact single-command-list submission; the submitted command-list object id is carried in the final metadata word.'];
+                        if (executeInfo && executeInfo.bundleRecordId != null) {
+                            notes.push(`This submission immediately follows PIXCmdListBundle RecordId ${executeInfo.bundleRecordId}${executeInfo.resourceObjectId != null ? ` for ${formatObj(executeInfo.resourceObjectId, ctx)}` : ''}.`);
+                        }
+                        return result(
+                            name,
+                            args,
+                            notes,
+                            `ExecuteCommandLists(this=${formatObj(meta[0], ctx)}, NumCommandLists:${a}, ppCommandLists:${display})`,
+                        );
+                    }
+                }
+                if (b != null) pushArg(args, 'PackedWord0', b);
+                if (c != null) pushArg(args, 'PackedWord1', c);
+                if (d != null) pushArg(args, 'PackedWord2', d);
+                return result(name, args, ['ExecuteCommandLists is stored in a compact submission form here; the command-list pointer array has not been expanded for this record.']);
             case 1069:
             case 1070:
                 addCommonThisArg(args, meta, ctx);
@@ -1781,14 +2093,32 @@
                 if (meta[0] != null) pushArg(args, 'Info0', meta[0]);
                 if (meta[1] != null) pushArg(args, 'Info1', meta[1]);
                 if (meta[2] != null) pushArg(args, 'LinkedEventRecordId', meta[2]);
-                if (meta[3] != null) pushArg(args, 'Info3', meta[3]);
+                if (opcode === 2034 && meta[3] != null) {
+                    pushArg(args, 'ResourceObjectId', meta[3], formatObj(meta[3], ctx));
+                } else if (meta[3] != null) {
+                    pushArg(args, 'Info3', meta[3]);
+                }
                 if (meta[4] != null) pushArg(args, 'Info4', meta[4]);
                 if (meta[2] != null) {
                     const linkedEvent = getEventByRecordId(ctx, meta[2]);
                     const linkedCall = getDecodedCall(linkedEvent, ctx);
                     if (linkedCall) pushArg(args, 'LinkedEvent', linkedCall, linkedCall);
                 }
+                if (opcode === 2034) {
+                    const bundleInfo = getPixBundleForEvent(ctx, evt);
+                    if (bundleInfo && bundleInfo.executeCommandLists && bundleInfo.executeCommandLists.length > 0) {
+                        const commandListIds = bundleInfo.executeCommandLists.flatMap((entry) => entry.commandListIds || []);
+                        if (commandListIds.length > 0) {
+                            const display = `{${commandListIds.map((id, index) => `Element_${index}:${formatObj(id, ctx)}`).join(', ')}}`;
+                            pushArg(args, 'FollowingCommandLists', commandListIds, display);
+                        }
+                    }
+                }
                 if (evt.userString) pushArg(args, 'Text', evt.userString);
+                if (opcode === 2034) {
+                    const notes = ['This internal PIX bundle record appears immediately before one or more ExecuteCommandLists submissions and likely wraps staged command-list-related data for the referenced resource.'];
+                    return result(name, args, notes);
+                }
                 return result(name, args);
             case 2035:
                 pushArg(args, 'RecordId', evt.recordId != null ? evt.recordId : evt.param1);
@@ -1856,6 +2186,8 @@
         buildResolveQueryInfo,
         buildSignalInfo,
         buildDescriptorInfo,
+        buildDescriptorHeapSetInfo,
+        buildPixBundleInfo,
         buildRasterStateInfo,
         buildBufferViewInfo,
         classifyPixVisibility,

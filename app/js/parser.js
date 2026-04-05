@@ -404,7 +404,31 @@ class WPixParser {
     }
 
     _extractEventLayout(data, view, evt, eventOffset) {
+        const opcode = evt.opcode >>> 0;
         const metaCount = this._getCoreMetaParamCount(evt.opcode >>> 0);
+        const compactBody = this._readCompactEventBody(data, evt, eventOffset);
+
+        if (opcode === 1005) {
+            const scissorRectCount = this._decodeCompactCount((evt.metaParams || [])[1], 1);
+            evt.scissorRectCount = scissorRectCount;
+            const scissorRects = this._decodeCompactScissorRects(compactBody, scissorRectCount);
+            if (scissorRects.length > 0) {
+                evt.scissorRects = scissorRects;
+            }
+        } else if (opcode === 1006) {
+            const viewportCount = this._decodeCompactCount((evt.metaParams || [])[1], 1);
+            evt.viewportCount = viewportCount;
+            const viewportSet = this._decodeCompactViewportSet(compactBody, viewportCount);
+            if (viewportSet) {
+                evt.viewportSet = viewportSet;
+            }
+        } else if (opcode === 1007) {
+            const blendFactor = this._decodeCompactBlendFactor(compactBody);
+            if (blendFactor) {
+                evt.blendFactor = blendFactor;
+            }
+        }
+
         if (metaCount == null) return;
 
         evt.coreMetaCount = metaCount;
@@ -416,7 +440,7 @@ class WPixParser {
         evt.payloadSize = payload.length;
         evt.payloadPreviewU32 = this._readPayloadPreviewU32(payload, 8);
 
-        switch (evt.opcode >>> 0) {
+        switch (opcode) {
             case 1700:
             case 1767: {
                 const descOffset = (evt.opcode >>> 0) === 1700 ? 12 : 0;
@@ -602,6 +626,14 @@ class WPixParser {
         return data.subarray(payloadStart, recordEnd);
     }
 
+    _readCompactEventBody(data, evt, eventOffset) {
+        if (!evt.metaOffset || evt.recordSize == null) return null;
+        const bodyStart = evt.metaOffset + 24;
+        const recordEnd = Math.min(data.length, eventOffset + evt.recordSize);
+        if (bodyStart >= recordEnd) return null;
+        return data.subarray(bodyStart, recordEnd);
+    }
+
     _readPayloadPreviewU32(data, maxWords) {
         const words = [];
         const count = Math.min(Math.floor(data.length / 4), maxWords || 0);
@@ -707,6 +739,12 @@ class WPixParser {
         return data[offset] | (data[offset + 1] << 8);
     }
 
+    _readI32FromBytes(data, offset) {
+        const value = this._readU32FromBytes(data, offset);
+        if (value == null) return null;
+        return value > 0x7FFFFFFF ? value - 0x100000000 : value;
+    }
+
     _readU32FromBytes(data, offset) {
         if (offset < 0 || offset + 4 > data.length) return null;
         return (
@@ -746,6 +784,98 @@ class WPixParser {
         for (let i = 0; i < count; i++) {
             values.push(view.getFloat32(offset + i * 4, true));
         }
+        return values;
+    }
+
+    _decodeCompactCount(rawCount, fallback) {
+        if (rawCount == null) return fallback;
+        const value = rawCount >>> 0;
+        const lowByte = value & 0xFF;
+        if (lowByte !== 0) return lowByte;
+        return value !== 0 ? value : fallback;
+    }
+
+    _decodeCompactScissorRects(compactBody, rectCount) {
+        if (!compactBody || rectCount == null || rectCount <= 0) return [];
+        const payloadOffset = 17;
+        const requiredBytes = rectCount * 16;
+        if (compactBody.length < payloadOffset + requiredBytes) return [];
+
+        const rects = [];
+        for (let i = 0; i < rectCount; i++) {
+            const base = payloadOffset + i * 16;
+            const left = this._readI32FromBytes(compactBody, base + 0);
+            const top = this._readI32FromBytes(compactBody, base + 4);
+            const right = this._readI32FromBytes(compactBody, base + 8);
+            const bottom = this._readI32FromBytes(compactBody, base + 12);
+            if (left == null || top == null || right == null || bottom == null) break;
+            rects.push({ left, top, right, bottom });
+        }
+
+        return rects;
+    }
+
+    _decodeCompactViewportSet(compactBody, viewportCount) {
+        if (!compactBody || viewportCount == null || viewportCount <= 0) return null;
+
+        const candidateOffsets = [17, 20, 0];
+        for (const payloadOffset of candidateOffsets) {
+            const requiredBytes = viewportCount * 24;
+            if (compactBody.length < payloadOffset + requiredBytes) continue;
+
+            const viewports = [];
+            let valid = true;
+            for (let i = 0; i < viewportCount; i++) {
+                const base = payloadOffset + i * 24;
+                const topLeftX = this._readFloat32ArrayFromBytes(compactBody, base + 0, 1)?.[0];
+                const topLeftY = this._readFloat32ArrayFromBytes(compactBody, base + 4, 1)?.[0];
+                const width = this._readFloat32ArrayFromBytes(compactBody, base + 8, 1)?.[0];
+                const height = this._readFloat32ArrayFromBytes(compactBody, base + 12, 1)?.[0];
+                const minDepth = this._readFloat32ArrayFromBytes(compactBody, base + 16, 1)?.[0];
+                const maxDepth = this._readFloat32ArrayFromBytes(compactBody, base + 20, 1)?.[0];
+
+                if (
+                    !Number.isFinite(topLeftX) ||
+                    !Number.isFinite(topLeftY) ||
+                    !Number.isFinite(width) ||
+                    !Number.isFinite(height) ||
+                    !Number.isFinite(minDepth) ||
+                    !Number.isFinite(maxDepth) ||
+                    width < 0 ||
+                    height < 0 ||
+                    maxDepth < minDepth ||
+                    !(width > 0 || height > 0 || maxDepth > minDepth)
+                ) {
+                    valid = false;
+                    break;
+                }
+
+                viewports.push({
+                    topLeftX,
+                    topLeftY,
+                    width,
+                    height,
+                    minDepth,
+                    maxDepth,
+                });
+            }
+
+            if (valid && viewports.length === viewportCount) {
+                return {
+                    numViewports: viewportCount,
+                    viewports,
+                };
+            }
+        }
+
+        return null;
+    }
+
+    _decodeCompactBlendFactor(compactBody) {
+        if (!compactBody || compactBody.length < 20) return null;
+        const payloadOffset = compactBody.length - 16;
+        const values = this._readFloat32ArrayFromBytes(compactBody, payloadOffset, 4);
+        if (!values || values.some((value) => !Number.isFinite(value))) return null;
         return values;
     }
 

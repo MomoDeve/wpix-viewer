@@ -3,6 +3,7 @@
 let parser = null;
 let directory = null;
 let headerInfo = null;
+let captureMetadata = null;
 let allEvents = [];
 let filteredEvents = [];
 let currentFilter = 'pix'; // 'api' = event index+details, 'pix' = GPU-visible PIX-like order, 'all' = everything
@@ -14,10 +15,25 @@ let queueInfo = new Map();
 let resolveQueryInfo = new Map();
 let signalInfo = new Map();
 let descriptorInfo = { labelsByKey: new Map(), historyByCommandList: new Map() };
+let descriptorHeapSetInfo = { byEventKey: new Map(), bySetId: new Map() };
+let pixBundleInfo = { bundleByEventKey: new Map(), executeByEventKey: new Map() };
 let bufferViewInfo = { labelsByKey: new Map() };
 let rasterStateInfo = { viewportHistoryByCommandList: new Map() };
 let resourceInfo = new Map();
 let currentSearchQuery = '';
+let selectedEventKey = null;
+let selectedObjectId = null;
+let dockviewApi = null;
+let workspacePanelSubscriptions = [];
+const WORKSPACE_LAYOUT_STORAGE_KEY = 'wpix-viewer.dockview-layout.v1';
+const WORKSPACE_PANEL_DEFS = {
+    capture: { title: 'Capture Info', contentId: 'capture-info' },
+    blocks: { title: 'Block Map', contentId: 'block-map' },
+    resources: { title: 'Resources', contentId: 'resource-table' },
+    events: { title: 'Events', contentId: 'event-table' },
+    'event-browser': { title: 'Event Browser', contentId: 'event-browser' },
+    'object-browser': { title: 'Object Browser', contentId: 'object-browser' },
+};
 
 function getPixSortKey(evt) {
     if (evt == null) return Number.MAX_SAFE_INTEGER;
@@ -28,6 +44,307 @@ function getPixSortKey(evt) {
 }
 
 function $(sel) { return document.querySelector(sel); }
+
+function isDesktopWorkspaceMode() {
+    return window.matchMedia('(min-width: 1181px)').matches;
+}
+
+function canMeasureWorkspace() {
+    const desktop = $('#workspace-desktop');
+    const results = $('#results-section');
+    if (!desktop || !results) return false;
+    if (!isDesktopWorkspaceMode()) return false;
+    if (results.offsetParent == null) return false;
+    return desktop.clientWidth >= 320 && desktop.clientHeight >= 240;
+}
+
+function getDockviewLibrary() {
+    return window['dockview-core'];
+}
+
+function saveWorkspaceLayout() {
+    if (!dockviewApi) return;
+    try {
+        localStorage.setItem(WORKSPACE_LAYOUT_STORAGE_KEY, JSON.stringify(dockviewApi.toJSON()));
+    } catch (_error) {
+        // Ignore storage failures. The workspace still works without persistence.
+    }
+}
+
+function loadWorkspaceLayout() {
+    try {
+        const raw = localStorage.getItem(WORKSPACE_LAYOUT_STORAGE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (_error) {
+        return null;
+    }
+}
+
+function clearWorkspaceLayout() {
+    try {
+        localStorage.removeItem(WORKSPACE_LAYOUT_STORAGE_KEY);
+    } catch (_error) {
+        // Ignore storage failures.
+    }
+}
+
+class WorkspacePanelRenderer {
+    constructor(panelId) {
+        const definition = WORKSPACE_PANEL_DEFS[panelId];
+        this.panelId = panelId;
+        this.element = document.createElement('div');
+        this.element.className = `workspace-panel-host workspace-panel-${panelId}`;
+
+        const body = document.createElement('div');
+        body.className = panelId === 'events' ? 'workspace-panel-body workspace-panel-body-events' : 'workspace-panel-body';
+
+        const content = document.createElement('div');
+        content.id = definition.contentId;
+        if (panelId === 'events') content.className = 'workspace-panel-events-content';
+        body.appendChild(content);
+        this.element.appendChild(body);
+    }
+
+    init() {}
+    layout() {}
+    update() {}
+    focus() {}
+    toJSON() { return { panelId: this.panelId }; }
+    dispose() {}
+}
+
+function createWorkspacePanelRenderer(options) {
+    const panelId = options.id;
+    if (!WORKSPACE_PANEL_DEFS[panelId]) {
+        throw new Error(`Unknown workspace panel '${panelId}'`);
+    }
+    return new WorkspacePanelRenderer(panelId);
+}
+
+function disposeWorkspacePanelSubscriptions() {
+    for (const subscription of workspacePanelSubscriptions) {
+        try {
+            subscription?.dispose?.();
+        } catch (_error) {
+            // Ignore cleanup failures.
+        }
+    }
+    workspacePanelSubscriptions = [];
+}
+
+function getWorkspacePanelContainer(panelId) {
+    const definition = WORKSPACE_PANEL_DEFS[panelId];
+    return definition ? document.getElementById(definition.contentId) : null;
+}
+
+function renderWorkspacePanelById(panelId) {
+    if (!headerInfo || !directory) return;
+
+    switch (panelId) {
+    case 'capture':
+        renderCaptureInfo(headerInfo, captureMetadata, directory, allEvents, objectInfo, queueInfo);
+        break;
+    case 'blocks':
+        renderBlockMap(directory);
+        break;
+    case 'resources':
+        renderResourceTable(resourceInfo);
+        break;
+    case 'events':
+        applyFilter(currentFilter || 'pix');
+        break;
+    case 'event-browser':
+        renderEventBrowserPanel();
+        break;
+    case 'object-browser':
+        renderObjectBrowserPanel();
+        break;
+    default:
+        break;
+    }
+}
+
+function scheduleWorkspacePanelRender(panelId, attempt = 0) {
+    if (!WORKSPACE_PANEL_DEFS[panelId]) return;
+    if (getWorkspacePanelContainer(panelId)) {
+        renderWorkspacePanelById(panelId);
+        return;
+    }
+    if (attempt >= 8) return;
+    requestAnimationFrame(() => scheduleWorkspacePanelRender(panelId, attempt + 1));
+}
+
+function bindWorkspacePanelActivation() {
+    disposeWorkspacePanelSubscriptions();
+    if (!dockviewApi) return;
+
+    for (const panelId of Object.keys(WORKSPACE_PANEL_DEFS)) {
+        const panel = dockviewApi.getPanel(panelId);
+        if (!panel?.api || typeof panel.api.onDidActiveChange !== 'function') continue;
+        const subscription = panel.api.onDidActiveChange((event) => {
+            if (event?.isActive) {
+                scheduleWorkspacePanelRender(panelId);
+            }
+        });
+        workspacePanelSubscriptions.push(subscription);
+    }
+}
+
+function buildDefaultDockviewLayout() {
+    if (!dockviewApi) return;
+    const desktop = $('#workspace-desktop');
+    const desktopWidth = Math.max(960, desktop?.clientWidth || 0);
+    const desktopHeight = Math.max(540, desktop?.clientHeight || 0);
+    const leftWidth = Math.max(260, Math.round(desktopWidth * 0.25));
+    const centerWidth = Math.max(420, Math.round(desktopWidth * 0.5));
+    const rightWidth = Math.max(260, Math.round(desktopWidth * 0.25));
+    const rightTopHeight = Math.max(220, Math.round(desktopHeight * 0.5));
+    const rightBottomHeight = Math.max(220, desktopHeight - rightTopHeight);
+
+    dockviewApi.clear();
+    const eventsPanel = dockviewApi.addPanel({
+        id: 'events',
+        component: 'workspace-panel',
+        title: WORKSPACE_PANEL_DEFS.events.title,
+        params: { panelId: 'events' },
+        initialWidth: centerWidth,
+    });
+    const eventBrowserPanel = dockviewApi.addPanel({
+        id: 'event-browser',
+        component: 'workspace-panel',
+        title: WORKSPACE_PANEL_DEFS['event-browser'].title,
+        params: { panelId: 'event-browser' },
+        initialWidth: leftWidth,
+        position: { referencePanel: 'events', direction: 'left' },
+    });
+    dockviewApi.addPanel({
+        id: 'object-browser',
+        component: 'workspace-panel',
+        title: WORKSPACE_PANEL_DEFS['object-browser'].title,
+        params: { panelId: 'object-browser' },
+        position: { referencePanel: 'event-browser', direction: 'within' },
+    });
+    const resourcesPanel = dockviewApi.addPanel({
+        id: 'resources',
+        component: 'workspace-panel',
+        title: WORKSPACE_PANEL_DEFS.resources.title,
+        params: { panelId: 'resources' },
+        initialWidth: rightWidth,
+        position: { referencePanel: 'events', direction: 'right' },
+    });
+    const capturePanel = dockviewApi.addPanel({
+        id: 'capture',
+        component: 'workspace-panel',
+        title: WORKSPACE_PANEL_DEFS.capture.title,
+        params: { panelId: 'capture' },
+        initialHeight: rightBottomHeight,
+        position: { referencePanel: 'resources', direction: 'below' },
+    });
+    dockviewApi.addPanel({
+        id: 'blocks',
+        component: 'workspace-panel',
+        title: WORKSPACE_PANEL_DEFS.blocks.title,
+        params: { panelId: 'blocks' },
+        position: { referencePanel: 'capture', direction: 'within' },
+    });
+
+    eventBrowserPanel.group.api.setSize({ width: leftWidth });
+    eventsPanel.group.api.setSize({ width: centerWidth });
+    resourcesPanel.group.api.setSize({ width: rightWidth, height: rightTopHeight });
+    capturePanel.group.api.setSize({ height: rightBottomHeight });
+}
+
+function refreshWorkspacePanels() {
+    if (!headerInfo || !directory) return;
+    renderWorkspacePanelById('capture');
+    renderWorkspacePanelById('blocks');
+    renderWorkspacePanelById('resources');
+    renderWorkspacePanelById('events');
+    renderWorkspacePanelById('event-browser');
+    renderWorkspacePanelById('object-browser');
+}
+
+function resetWorkspaceLayout(useSavedLayout = true) {
+    const api = ensureDockviewWorkspace();
+    if (!api) return;
+
+    if (useSavedLayout) {
+        const savedLayout = loadWorkspaceLayout();
+        if (savedLayout) {
+            try {
+                api.fromJSON(savedLayout);
+                bindWorkspacePanelActivation();
+                refreshWorkspacePanels();
+                return;
+            } catch (error) {
+                console.warn('Dockview layout restore failed, rebuilding default layout.', error);
+            }
+        }
+    }
+
+    buildDefaultDockviewLayout();
+    bindWorkspacePanelActivation();
+    refreshWorkspacePanels();
+    saveWorkspaceLayout();
+}
+
+function ensureDockviewWorkspace() {
+    if (dockviewApi) return dockviewApi;
+    const desktop = $('#workspace-desktop');
+    const dockview = getDockviewLibrary();
+    if (!desktop || !dockview || typeof dockview.createDockview !== 'function') return null;
+
+    dockviewApi = dockview.createDockview(desktop, {
+        createComponent: createWorkspacePanelRenderer,
+        noPanelsOverlay: 'emptyGroup',
+        disableFloatingGroups: true,
+        className: 'wpix-dockview',
+        defaultHeaderPosition: 'top',
+        tabAnimation: 'default',
+    });
+
+    dockviewApi.onDidLayoutChange(() => {
+        if (dockviewApi && dockviewApi.totalPanels > 0) {
+            saveWorkspaceLayout();
+        }
+    });
+
+    return dockviewApi;
+}
+
+function initWorkspace() {
+    const desktop = $('#workspace-desktop');
+    if (!desktop) return;
+
+    $('#reset-layout-btn')?.addEventListener('click', () => {
+        clearWorkspaceLayout();
+        resetWorkspaceLayout(false);
+        focusWindowById('events');
+    });
+
+    desktop.addEventListener('click', (event) => {
+        const objectRef = event.target.closest('.ref-object');
+        if (objectRef) {
+            event.preventDefault();
+            openObjectWindow(Number(objectRef.dataset.objectId));
+            return;
+        }
+
+        const eventRef = event.target.closest('.ref-event');
+        if (eventRef) {
+            event.preventDefault();
+            openEventWindowByRecordId(Number(eventRef.dataset.recordId));
+        }
+    });
+
+    window.addEventListener('resize', () => {
+        if (dockviewApi && canMeasureWorkspace()) {
+            dockviewApi.layout(desktop.clientWidth, desktop.clientHeight, true);
+        }
+    });
+}
 
 function init() {
     const dropZone = $('#drop-zone');
@@ -44,6 +361,8 @@ function init() {
     fileInput.addEventListener('change', (e) => {
         if (e.target.files.length) handleFile(e.target.files[0]);
     });
+
+    initWorkspace();
 }
 
 async function handleFile(file) {
@@ -83,6 +402,7 @@ async function handleFile(file) {
             console.warn('Metadata extraction failed:', e);
         }
     }
+    captureMetadata = metadata;
 
     showStatus('Extracting resource names...');
     resourceNames = new Map();
@@ -133,11 +453,15 @@ async function handleFile(file) {
     resolveQueryInfo = WPixEventDecoder.buildResolveQueryInfo(allEvents);
     signalInfo = WPixEventDecoder.buildSignalInfo(allEvents);
     descriptorInfo = WPixEventDecoder.buildDescriptorInfo(allEvents);
+    descriptorHeapSetInfo = WPixEventDecoder.buildDescriptorHeapSetInfo(allEvents);
+    pixBundleInfo = WPixEventDecoder.buildPixBundleInfo(allEvents);
     bufferViewInfo = WPixEventDecoder.buildBufferViewInfo(allEvents, descriptorInfo);
-    rasterStateInfo = WPixEventDecoder.buildRasterStateInfo(allEvents);
+    rasterStateInfo = WPixEventDecoder.buildRasterStateInfo(allEvents, { resourceInfo });
+    selectedEventKey = null;
+    selectedObjectId = null;
 
     for (const evt of allEvents) {
-        const decoded = WPixEventDecoder.decodeEvent(evt, { resourceNames, eventDetailsByRecordId, objectInfo, resolveQueryInfo, signalInfo, descriptorInfo, bufferViewInfo, rasterStateInfo });
+        const decoded = WPixEventDecoder.decodeEvent(evt, { resourceNames, eventDetailsByRecordId, objectInfo, resolveQueryInfo, signalInfo, descriptorInfo, descriptorHeapSetInfo, pixBundleInfo, bufferViewInfo, rasterStateInfo });
         evt._decoded = decoded;
         evt.decodedName = decoded.name;
         evt.call = decoded.call;
@@ -165,13 +489,24 @@ async function handleFile(file) {
     }
 
     $('#upload-section').style.display = 'none';
-    $('#results-section').style.display = 'block';
+    $('#results-section').style.display = 'flex';
+    ensureDockviewWorkspace();
+    if (!dockviewApi || dockviewApi.totalPanels === 0) {
+        resetWorkspaceLayout();
+    }
 
-    renderCaptureInfo(headerInfo, metadata, directory, allEvents, objectInfo, queueInfo);
+    renderCaptureInfo(headerInfo, captureMetadata, directory, allEvents, objectInfo, queueInfo);
     renderBlockMap(directory);
     renderResourceTable(resourceInfo);
     applyFilter('pix');
-    showStatus(`Loaded: ${allEvents.length} events from ${directory.length} blocks`);
+    renderObjectBrowserPanel();
+    requestAnimationFrame(() => {
+        if (dockviewApi && canMeasureWorkspace()) {
+            dockviewApi.layout($('#workspace-desktop').clientWidth, $('#workspace-desktop').clientHeight, true);
+        }
+        focusWindowById('events');
+    });
+    showStatus(`${allEvents.length.toLocaleString()} events • ${directory.length} blocks`);
 }
 
 function buildResourceRows(resources) {
@@ -297,7 +632,7 @@ function renderResourceTable(resources) {
     for (const texture of textures) {
         html += `<tr>
             <td>${texture.id}</td>
-            <td><code>obj#${texture.objectId}</code></td>
+            <td>${objectRefButton(texture.objectId, `obj#${texture.objectId}`)}</td>
             <td>${escapeHtml(texture.name || '')}</td>
             <td>${texture.estimatedSize != null ? texture.estimatedSize.toLocaleString() : ''}</td>
             <td>${escapeHtml(texture.format || '')}</td>
@@ -308,7 +643,7 @@ function renderResourceTable(resources) {
             <td>${texture.arrayCount != null ? texture.arrayCount.toLocaleString() : ''}</td>
             <td>${texture.sampleCount != null ? texture.sampleCount.toLocaleString() : ''}</td>
             <td>${escapeHtml(texture.creationType || '')}</td>
-            <td>${texture.heapObjectId != null ? `<code>obj#${texture.heapObjectId}</code>` : ''}</td>
+            <td>${texture.heapObjectId != null ? objectRefButton(texture.heapObjectId, `obj#${texture.heapObjectId}`) : ''}</td>
             <td>${texture.heapOffset != null ? texture.heapOffset.toLocaleString() : ''}</td>
             <td>${escapeHtml(texture.layout || '')}</td>
             <td>${escapeHtml(texture.flags || '')}</td>
@@ -323,7 +658,535 @@ function renderResourceTable(resources) {
 /** Format event for display */
 function formatEvent(evt) {
     if (evt && evt._decoded) return evt._decoded;
-    return WPixEventDecoder.decodeEvent(evt, { resourceNames, eventDetailsByRecordId, objectInfo, resolveQueryInfo, signalInfo, descriptorInfo, bufferViewInfo, rasterStateInfo });
+    return WPixEventDecoder.decodeEvent(evt, { resourceNames, eventDetailsByRecordId, objectInfo, resolveQueryInfo, signalInfo, descriptorInfo, descriptorHeapSetInfo, pixBundleInfo, bufferViewInfo, rasterStateInfo });
+}
+
+function focusWindowById(windowId) {
+    const panel = dockviewApi?.getPanel(windowId);
+    panel?.api.setActive();
+}
+
+function objectRefButton(id, label) {
+    if (id == null || !Number.isFinite(Number(id))) return escapeHtml(String(label || ''));
+    const display = label || `obj#${id}`;
+    return `<button type="button" class="ref-link ref-object mono" data-object-id="${Number(id)}">${escapeHtml(display)}</button>`;
+}
+
+function eventRefButton(recordId, label) {
+    if (recordId == null || !Number.isFinite(Number(recordId))) return escapeHtml(String(label || ''));
+    const display = label || `RecordId ${recordId}`;
+    return `<button type="button" class="ref-link ref-event mono" data-record-id="${Number(recordId)}">${escapeHtml(display)}</button>`;
+}
+
+function renderReferenceMarkup(text) {
+    const source = String(text == null ? '' : text);
+    if (!source) return '';
+
+    const pattern = /(obj#(\d+)(?:\s*<[^>]+>)?)|(RecordId(?:=|:|\s+)(\d+))/g;
+    let result = '';
+    let lastIndex = 0;
+    let match;
+
+    while ((match = pattern.exec(source)) !== null) {
+        result += escapeHtml(source.slice(lastIndex, match.index));
+        if (match[1]) {
+            result += objectRefButton(Number(match[2]), match[1]);
+        } else if (match[3]) {
+            result += eventRefButton(Number(match[4]), match[3]);
+        }
+        lastIndex = pattern.lastIndex;
+    }
+
+    result += escapeHtml(source.slice(lastIndex));
+    return result;
+}
+
+function collectObjectIdsFromText(text, output) {
+    const source = String(text == null ? '' : text);
+    const target = output || new Set();
+    const pattern = /obj#(\d+)/g;
+    let match;
+    while ((match = pattern.exec(source)) !== null) {
+        target.add(Number(match[1]));
+    }
+    return target;
+}
+
+function collectObjectIdsFromValue(value, output) {
+    const target = output || new Set();
+    if (value == null) return target;
+    if (Array.isArray(value)) {
+        value.forEach((entry) => collectObjectIdsFromValue(entry, target));
+        return target;
+    }
+    if (typeof value === 'object') {
+        Object.values(value).forEach((entry) => collectObjectIdsFromValue(entry, target));
+        return target;
+    }
+    if (typeof value === 'string') {
+        collectObjectIdsFromText(value, target);
+    }
+    return target;
+}
+
+function collectEventObjectIds(evt) {
+    if (evt && evt._objectRefs instanceof Set) return evt._objectRefs;
+    const target = new Set();
+    if (!evt) return target;
+    if (evt.objectId != null && Number.isFinite(Number(evt.objectId))) target.add(Number(evt.objectId));
+    collectObjectIdsFromText(evt.call, target);
+    collectObjectIdsFromText(evt.userString, target);
+    collectObjectIdsFromValue(evt.args, target);
+    collectObjectIdsFromValue(evt.notes, target);
+    collectObjectIdsFromValue(buildStructuredEventFields(evt), target);
+    evt._objectRefs = target;
+    return target;
+}
+
+function findEventBySelectionKey(key, events = allEvents) {
+    if (!key || !events) return null;
+    return events.find((evt) => getEventSelectionKey(evt) === key) || null;
+}
+
+function openObjectWindow(objectId) {
+    if (objectId == null || !Number.isFinite(objectId)) return;
+    selectedObjectId = objectId;
+    renderObjectBrowserPanel();
+    focusWindowById('object-browser');
+}
+
+function openEventWindowByRecordId(recordId) {
+    if (recordId == null || !Number.isFinite(recordId)) return;
+    const evt = allEvents.find((candidate) => candidate.param1 === recordId || candidate.recordId === recordId);
+    if (!evt) return;
+    selectedEventKey = getEventSelectionKey(evt);
+    const isVisibleInCurrentView = filteredEvents.some((candidate) => getEventSelectionKey(candidate) === selectedEventKey);
+    if (!isVisibleInCurrentView) {
+        currentSearchQuery = '';
+        applyFilter(evt.isPixGpuVisible ? 'pix' : 'all');
+    } else {
+        renderEventTable(filteredEvents);
+        renderEventBrowserPanel();
+    }
+    focusWindowById('events');
+    renderEventBrowserPanel();
+    focusWindowById('event-browser');
+}
+
+function shortenEventListText(value, maxLength) {
+    const text = String(value == null ? '' : value);
+    if (text.length <= maxLength) return text;
+    return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function buildEventListSummary(fmt) {
+    if (!fmt) return '';
+    const args = Array.isArray(fmt.args) ? fmt.args : [];
+    if (args.length === 0) return fmt.name || '';
+
+    const maxArgs = 3;
+    const parts = args.slice(0, maxArgs).map((arg) => {
+        const name = arg && arg.name ? arg.name : 'arg';
+        const display = shortenEventListText(arg && arg.display != null ? arg.display : arg && arg.value, 28);
+        return `${name}:${display}`;
+    });
+
+    let summary = `${fmt.name}(${parts.join(', ')}`;
+    if (args.length > maxArgs) summary += `, +${args.length - maxArgs} more`;
+    summary += ')';
+    return shortenEventListText(summary, 120);
+}
+
+function getEventSelectionKey(evt) {
+    if (!evt) return null;
+    if (evt.sequence != null) return `seq:${evt.sequence}`;
+    if (evt.param1 != null) return `rid:${evt.param1}`;
+    if (evt.recordId != null) return `record:${evt.recordId}`;
+    if (evt.blockIndex != null && evt.offset != null) return `block:${evt.blockIndex}:offset:${evt.offset}`;
+    return null;
+}
+
+function getSelectedEventIndex(events) {
+    if (!events || events.length === 0) return -1;
+    if (!selectedEventKey) {
+        selectedEventKey = getEventSelectionKey(events[0]);
+        return 0;
+    }
+    const index = events.findIndex((evt) => getEventSelectionKey(evt) === selectedEventKey);
+    if (index !== -1) return index;
+    selectedEventKey = getEventSelectionKey(events[0]);
+    return 0;
+}
+
+function renderInspectorFacts(items) {
+    const rows = items.filter((item) => item && item.value != null && item.value !== '');
+    if (rows.length === 0) return '<div class="event-browser-empty">No structured facts available for this event.</div>';
+    return `<div class="event-fact-grid">${rows.map((item) => `
+        <div class="event-fact">
+            <div class="event-fact-label">${escapeHtml(item.label)}</div>
+            <div class="event-fact-value ${item.mono ? 'mono' : ''}">${renderReferenceMarkup(String(item.value))}</div>
+        </div>
+    `).join('')}</div>`;
+}
+
+function renderPrimitiveReference(keyName, value, fallbackDisplay) {
+    const normalizedKey = String(keyName || '').toLowerCase();
+    const display = fallbackDisplay != null ? String(fallbackDisplay) : String(value);
+    if (Number.isFinite(Number(value))) {
+        if (normalizedKey === 'recordid' || normalizedKey.endsWith('recordid')) {
+            return eventRefButton(Number(value), display || `RecordId ${Number(value)}`);
+        }
+        if (normalizedKey === 'objectid' || normalizedKey.endsWith('objectid')) {
+            return objectRefButton(Number(value), display || `obj#${Number(value)}`);
+        }
+    }
+
+    return renderReferenceMarkup(display);
+}
+
+function isArgumentTreeBranchValue(value) {
+    if (value == null) return false;
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === 'object') return Object.keys(value).length > 0;
+    return false;
+}
+
+function renderArgumentTreeValue(value, fallbackDisplay, depth = 0, keyName = '') {
+    const safeDisplay = fallbackDisplay != null ? String(fallbackDisplay) : '';
+    if (value == null) {
+        return `<span class="arg-tree-leaf mono">${escapeHtml(safeDisplay || 'null')}</span>`;
+    }
+
+    if (Array.isArray(value)) {
+        if (value.length === 0) {
+            return '<span class="arg-tree-leaf mono">[]</span>';
+        }
+        return `
+            <div class="arg-tree-group" data-depth="${depth}">
+                <div class="arg-tree-children">
+                    ${value.map((entry, index) => `
+                        <div class="arg-tree-node">
+                            <div class="arg-tree-row ${isArgumentTreeBranchValue(entry) ? 'arg-tree-row-branch' : 'arg-tree-row-leaf'}">
+                                <span class="arg-tree-key mono">[${index}]</span>
+                                <div class="arg-tree-value">${renderArgumentTreeValue(entry, null, depth + 1, '')}</div>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>`;
+    }
+
+    if (typeof value === 'object') {
+        const entries = Object.entries(value);
+        if (entries.length === 0) {
+            return '<span class="arg-tree-leaf mono">{}</span>';
+        }
+        return `
+            <div class="arg-tree-group" data-depth="${depth}">
+                <div class="arg-tree-children">
+                    ${entries.map(([key, entryValue]) => `
+                        <div class="arg-tree-node">
+                            <div class="arg-tree-row ${isArgumentTreeBranchValue(entryValue) ? 'arg-tree-row-branch' : 'arg-tree-row-leaf'}">
+                                <span class="arg-tree-key mono">${escapeHtml(key)}</span>
+                                <div class="arg-tree-value">${renderArgumentTreeValue(entryValue, null, depth + 1, key)}</div>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>`;
+    }
+
+    const leafText = safeDisplay || String(value);
+    return `<span class="arg-tree-leaf ${String(value).length > 48 ? 'mono' : ''}">${renderPrimitiveReference(keyName, value, leafText)}</span>`;
+}
+
+function renderInspectorArgTable(args) {
+    if (!args || args.length === 0) return '<div class="event-browser-empty">No decoded arguments were exposed for this event.</div>';
+    return `
+        <div class="event-arg-tree-scroll">
+            <div class="event-arg-tree">
+                ${args.map((arg) => `
+                    <div class="event-arg-item">
+                        <div class="event-arg-name mono">${escapeHtml(arg.name)}</div>
+                        <div class="event-arg-body">${renderArgumentTreeValue(arg.value, arg.display, 0, arg.name)}</div>
+                    </div>
+                `).join('')}
+            </div>
+        </div>`;
+}
+
+function renderInspectorList(items) {
+    if (!items || items.length === 0) return '<div class="event-browser-empty">No additional notes.</div>';
+    return `<ul class="event-browser-list">${items.map((item) => `<li>${renderReferenceMarkup(String(item))}</li>`).join('')}</ul>`;
+}
+
+function renderInspectorJson(value, emptyMessage) {
+    if (!value || (typeof value === 'object' && Object.keys(value).length === 0)) {
+        return `<div class="event-browser-empty">${escapeHtml(emptyMessage)}</div>`;
+    }
+    return `<pre class="event-json">${escapeHtml(JSON.stringify(value, null, 2))}</pre>`;
+}
+
+function buildStructuredEventFields(evt) {
+    if (!evt) return {};
+    const ignored = new Set([
+        'offset',
+        'metaOffset',
+        'recordSize',
+        'dataSize',
+        'payloadSize',
+        'payloadPreviewU32',
+        'metaParams',
+        'coreMetaCount',
+        'coreMetaParams',
+        'param1',
+        'param2',
+        'opcode',
+        'sequence',
+        'blockIndex',
+        'blockType',
+        'blockTypeName',
+        'pixGlobalId',
+        'pixVisibility',
+        'pixVisibilityReason',
+        'isPixGpuVisible',
+        'pixSortKey',
+        'recordId',
+        'decodedName',
+        'call',
+        'args',
+        'notes',
+        '_decoded',
+    ]);
+
+    const fields = {};
+    for (const [key, value] of Object.entries(evt)) {
+        if (ignored.has(key) || key.startsWith('_')) continue;
+        if (value == null) continue;
+        if (Array.isArray(value) && value.length === 0) continue;
+        fields[key] = value;
+    }
+    return fields;
+}
+
+function renderEventBrowserContent(evt, absoluteIndex, totalCount) {
+    if (!evt) {
+        return `
+            <div class="event-browser-inspector">
+                <div class="event-browser-empty-state">
+                    <h3>Event Browser</h3>
+                    <p>Select an event from the table to inspect its decoded structure.</p>
+                </div>
+            </div>`;
+    }
+
+    const fmt = formatEvent(evt);
+    const recordId = evt.param1 != null ? evt.param1 : (evt.recordId != null ? evt.recordId : '');
+    const facts = [
+        { label: 'Selection', value: `${absoluteIndex + 1} / ${totalCount}` },
+        { label: 'Name', value: fmt.name },
+        { label: 'Sequence', value: evt.sequence, mono: true },
+        { label: 'Global ID', value: evt.pixGlobalId != null ? evt.pixGlobalId : '' },
+        { label: 'Visibility', value: evt.pixVisibility || '' },
+        { label: 'Opcode', value: evt.opcode, mono: true },
+        { label: 'Record ID', value: recordId, mono: true },
+        { label: 'Block', value: evt.blockTypeName || '' },
+        { label: 'Payload Size', value: evt.dataSize != null ? evt.dataSize : '' },
+    ];
+
+    const rawFacts = [
+        { label: 'Meta Params', value: evt.metaParams && evt.metaParams.length ? evt.metaParams.join(', ') : '' , mono: true },
+        { label: 'Core Meta', value: evt.coreMetaParams && evt.coreMetaParams.length ? evt.coreMetaParams.join(', ') : '' , mono: true },
+        { label: 'Payload Preview', value: evt.payloadPreviewU32 && evt.payloadPreviewU32.length ? evt.payloadPreviewU32.join(', ') : '' , mono: true },
+        { label: 'User String', value: evt.userString || '' },
+        { label: 'Embedded Strings', value: evt.embeddedStrings && evt.embeddedStrings.length ? evt.embeddedStrings.join(' | ') : '' },
+    ];
+
+    const structuredFields = buildStructuredEventFields(evt);
+
+    return `
+        <div class="event-browser-inspector">
+            <div class="event-browser-header">
+                <div>
+                    <div class="event-browser-kicker">Event Browser</div>
+                    <h3>${escapeHtml(fmt.name)}</h3>
+                </div>
+                <span class="visibility-badge visibility-${escapeHtml(evt.pixVisibility || 'internal')}">${escapeHtml(evt.pixVisibility || 'internal')}</span>
+            </div>
+
+            <section class="event-browser-section">
+                <h4>Overview</h4>
+                ${renderInspectorFacts(facts)}
+            </section>
+
+            <section class="event-browser-section">
+                <h4>Decoded Call</h4>
+                <div class="event-call-block mono">${renderReferenceMarkup(fmt.call)}</div>
+            </section>
+
+            <section class="event-browser-section">
+                <h4>Decoded Arguments</h4>
+                ${renderInspectorArgTable(fmt.args || [])}
+            </section>
+
+            <section class="event-browser-section">
+                <h4>Decoder Notes</h4>
+                ${renderInspectorList(fmt.notes || [])}
+            </section>
+
+            <section class="event-browser-section">
+                <h4>Raw Metadata</h4>
+                ${renderInspectorFacts(rawFacts)}
+            </section>
+
+            <section class="event-browser-section">
+                <h4>Structured Fields</h4>
+                ${Object.keys(structuredFields).length === 0
+                    ? '<div class="event-browser-empty">This event does not expose additional structured fields yet.</div>'
+                    : `<div class="event-arg-body">${renderArgumentTreeValue(structuredFields, null, 0, 'structuredFields')}</div>`}
+            </section>
+
+            <details class="event-browser-section">
+                <summary>Raw Event JSON</summary>
+                ${renderInspectorJson({
+                    sequence: evt.sequence,
+                    pixGlobalId: evt.pixGlobalId,
+                    pixVisibility: evt.pixVisibility,
+                    opcode: evt.opcode,
+                    param1: evt.param1,
+                    param2: evt.param2,
+                    recordId,
+                    blockType: evt.blockType,
+                    blockTypeName: evt.blockTypeName,
+                    metaParams: evt.metaParams || [],
+                    coreMetaParams: evt.coreMetaParams || [],
+                    payloadPreviewU32: evt.payloadPreviewU32 || [],
+                    structuredFields,
+                }, 'No raw event data.')}
+            </details>
+        </div>`;
+}
+
+function renderEventBrowserPanel() {
+    const container = $('#event-browser');
+    if (!container) return;
+    const selectedEvent = findEventBySelectionKey(selectedEventKey, allEvents);
+    const absoluteIndex = selectedEvent ? Math.max(0, allEvents.findIndex((evt) => getEventSelectionKey(evt) === selectedEventKey)) : -1;
+    container.innerHTML = renderEventBrowserContent(selectedEvent, absoluteIndex, allEvents.length);
+}
+
+function renderObjectBrowserContent(objectId) {
+    if (objectId == null) {
+        return `
+            <div class="event-browser-inspector">
+                <div class="event-browser-empty-state">
+                    <h3>Object Browser</h3>
+                    <p>Click any <code>obj#...</code> reference to inspect the decoded object, resource, or queue metadata here.</p>
+                </div>
+            </div>`;
+    }
+
+    const object = objectInfo.get(objectId) || { objectId };
+    const resource = resourceInfo.get(objectId) || null;
+    const queue = queueInfo.get(objectId) || null;
+    const relatedObjects = [
+        object.linkedObjectId != null ? { label: 'Linked Object', value: `obj#${object.linkedObjectId}` } : null,
+        object.originalObjectId != null ? { label: 'Original Object', value: `obj#${object.originalObjectId}` } : null,
+        resource && resource.heapObjectId != null ? { label: 'Heap', value: `obj#${resource.heapObjectId}` } : null,
+    ].filter(Boolean);
+
+    const relatedEvents = [];
+    for (const evt of allEvents) {
+        if (relatedEvents.length >= 18) break;
+        const objectIds = collectEventObjectIds(evt);
+        if (objectIds.has(objectId)) {
+            relatedEvents.push(evt);
+        }
+    }
+
+    const summaryFacts = [
+        { label: 'Object', value: `obj#${objectId}` },
+        { label: 'Name', value: object.resourceName || resource?.resourceName || '' },
+        { label: 'Interface', value: object.interfaceName || '' },
+        { label: 'Record ID', value: object.recordId != null ? String(object.recordId) : '' },
+        { label: 'Source Opcode', value: object.sourceOpcode != null ? String(object.sourceOpcode) : '' },
+    ];
+
+    const resourceFacts = resource ? [
+        { label: 'Creation', value: resource.creationType || '' },
+        { label: 'Dimension', value: resource.dimension || '' },
+        { label: 'Format', value: resource.format || resource.inferredFormat || '' },
+        { label: 'Size', value: resource.width != null ? `${resource.width} x ${resource.height || 1}` : '' },
+        { label: 'Mips', value: resource.mipLevels != null ? String(resource.mipLevels) : '' },
+        { label: 'Array', value: resource.arrayCount != null ? String(resource.arrayCount) : '' },
+        { label: 'Layout', value: resource.layout || '' },
+    ] : [];
+
+    const queueFacts = queue ? [
+        { label: 'Queue Type', value: queue.queueType || '' },
+        { label: 'Node Mask', value: queue.queueNodeMask != null ? `0x${(queue.queueNodeMask >>> 0).toString(16).padStart(8, '0')}` : '' },
+        { label: 'Command Lists', value: queue.commandLists && queue.commandLists.length ? queue.commandLists.map((id) => `obj#${id}`).join(', ') : '' },
+        { label: 'Fences', value: queue.fences && queue.fences.length ? queue.fences.map((id) => `obj#${id}`).join(', ') : '' },
+    ] : [];
+
+    return `
+        <div class="event-browser-inspector">
+            <div class="event-browser-header">
+                <div>
+                    <div class="event-browser-kicker">Object Browser</div>
+                    <h3>${renderReferenceMarkup(`obj#${objectId}`)}</h3>
+                </div>
+            </div>
+
+            <section class="event-browser-section">
+                <h4>Overview</h4>
+                ${renderInspectorFacts(summaryFacts)}
+            </section>
+
+            ${relatedObjects.length > 0 ? `
+                <section class="event-browser-section">
+                    <h4>Related Objects</h4>
+                    ${renderInspectorFacts(relatedObjects)}
+                </section>` : ''}
+
+            ${resourceFacts.length > 0 ? `
+                <section class="event-browser-section">
+                    <h4>Resource Details</h4>
+                    ${renderInspectorFacts(resourceFacts)}
+                </section>` : ''}
+
+            ${queueFacts.length > 0 ? `
+                <section class="event-browser-section">
+                    <h4>Queue Details</h4>
+                    ${renderInspectorFacts(queueFacts)}
+                </section>` : ''}
+
+            <section class="event-browser-section">
+                <h4>Related Events</h4>
+                ${relatedEvents.length === 0
+                    ? '<div class="event-browser-empty">No matching events were found for this object yet.</div>'
+                    : `<ul class="event-browser-list">${relatedEvents.map((evt) => {
+                        const fmt = formatEvent(evt);
+                        const recordId = evt.param1 != null ? evt.param1 : evt.recordId;
+                        return `<li>${eventRefButton(recordId, `${fmt.name} (RecordId ${recordId})`)}</li>`;
+                    }).join('')}</ul>`}
+            </section>
+
+            <details class="event-browser-section">
+                <summary>Raw Object JSON</summary>
+                ${renderInspectorJson({
+                    object,
+                    resource,
+                    queue,
+                }, 'No object metadata was decoded.')}
+            </details>
+        </div>`;
+}
+
+function renderObjectBrowserPanel() {
+    const container = $('#object-browser');
+    if (!container) return;
+    container.innerHTML = renderObjectBrowserContent(selectedObjectId);
 }
 
 function getBaseFilteredEvents(filter) {
@@ -368,6 +1231,8 @@ function applyFilter(filter) {
     currentFilter = filter;
     filteredEvents = getBaseFilteredEvents(filter).filter((evt) => matchesEventSearch(evt, currentSearchQuery));
     renderEventTable(filteredEvents);
+    renderEventBrowserPanel();
+    renderObjectBrowserPanel();
 
     // Update active button
     document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
@@ -412,10 +1277,10 @@ function renderCaptureInfo(header, metadata, dir, events, objInfo, queues) {
         html += '<details class="meta-details"><summary>Queue Summary</summary><ul>';
         for (const queue of queues.values()) {
             const details = [];
-            if (queue.queueType) details.push(`type=${escapeHtml(queue.queueType)}`);
+            if (queue.queueType) details.push(`type=${queue.queueType}`);
             if (queue.queueNodeMask != null) details.push(`nodeMask=0x${(queue.queueNodeMask >>> 0).toString(16).padStart(8, '0')}`);
-            if (queue.commandLists && queue.commandLists.length) details.push(`cmdLists=${queue.commandLists.join(', ')}`);
-            html += `<li><code>obj#${queue.objectId}</code> ${details.join(' | ')}</li>`;
+            if (queue.commandLists && queue.commandLists.length) details.push(`cmdLists=${queue.commandLists.map((id) => `obj#${id}`).join(', ')}`);
+            html += `<li>${objectRefButton(queue.objectId, `obj#${queue.objectId}`)} ${renderReferenceMarkup(details.join(' | '))}</li>`;
         }
         html += '</ul></details>';
     }
@@ -428,7 +1293,9 @@ function renderCaptureInfo(header, metadata, dir, events, objInfo, queues) {
         html += '</ul></details>';
     }
 
-    $('#capture-info').innerHTML = html;
+    const container = $('#capture-info');
+    if (!container) return;
+    container.innerHTML = html;
 }
 
 function renderBlockMap(dir) {
@@ -466,13 +1333,42 @@ function renderBlockMap(dir) {
     }
     html += '</div>';
 
-    $('#block-map').innerHTML = html;
+    const container = $('#block-map');
+    if (!container) return;
+    container.innerHTML = html;
 }
 
 function renderEventTable(events) {
     const container = $('#event-table');
     const PAGE_SIZE = 200;
-    let currentPage = 0;
+    if (!container) return;
+    if (!events || events.length === 0) {
+        selectedEventKey = null;
+        container.innerHTML = `
+            <div class="table-controls">
+                <div class="filter-buttons">
+                    <button class="filter-btn ${currentFilter === 'api' ? 'active' : ''}" data-filter="api" onclick="applyFilter('api')">API Events (${allEvents.filter(e => e.blockType === 0x3E8 || e.blockType === 0x3E9).length.toLocaleString()})</button>
+                    <button class="filter-btn ${currentFilter === 'pix' ? 'active' : ''}" data-filter="pix" onclick="applyFilter('pix')">PIX Global View (${allEvents.filter(e => e.isPixGpuVisible).length.toLocaleString()})</button>
+                    <button class="filter-btn ${currentFilter === 'all' ? 'active' : ''}" data-filter="all" onclick="applyFilter('all')">All Events (${allEvents.length.toLocaleString()})</button>
+                </div>
+                <label class="event-search">
+                    <span>Search</span>
+                    <input id="event-search" type="search" value="${escapeHtml(currentSearchQuery)}" placeholder="Name or Global ID" />
+                </label>
+                <span>0 events</span>
+            </div>
+            <div class="event-browser-empty-state">
+                <h3>No events match this view</h3>
+                <p>Adjust the search or switch filters to browse decoded events.</p>
+            </div>`;
+        $('#event-search')?.addEventListener('input', (e) => {
+            currentSearchQuery = e.target.value || '';
+            applyFilter(currentFilter);
+        });
+        return;
+    }
+
+    let currentPage = Math.floor(getSelectedEventIndex(events) / PAGE_SIZE);
     const totalPages = Math.max(1, Math.ceil(events.length / PAGE_SIZE));
     const isPixView = currentFilter === 'pix';
     const apiEventCount = allEvents.filter(e => e.blockType === 0x3E8 || e.blockType === 0x3E9).length;
@@ -484,14 +1380,13 @@ function renderEventTable(events) {
         return evt.pixVisibility;
     }
 
-    function recordIdForDisplay(evt) {
-        if (!evt) return '';
-        if (evt.param1 != null) return evt.param1;
-        if (evt.recordId != null) return evt.recordId;
-        return '';
-    }
-
-    function renderPage(page) {
+    function renderPage(page, options = {}) {
+        const preserveTableScroll = options.preserveTableScroll === true;
+        const previousTableScroll = preserveTableScroll
+            ? container.querySelector('.event-table-scroll')
+            : null;
+        const previousTableScrollTop = previousTableScroll ? previousTableScroll.scrollTop : 0;
+        const previousTableScrollLeft = previousTableScroll ? previousTableScroll.scrollLeft : 0;
         const start = page * PAGE_SIZE;
         const end = Math.min(start + PAGE_SIZE, events.length);
         const slice = events.slice(start, end);
@@ -515,29 +1410,29 @@ function renderEventTable(events) {
             ${isPixView ? '<div class="event-note">PIX Global View is derived from the WPIX GPU-visible event order and may still differ from PIX where events are not fully decoded yet.</div>' : ''}
             <div class="event-table-scroll">
             <table class="data-table event-data-table"><thead><tr>
-                <th>Global ID</th><th>Visibility</th><th>Event</th><th>Decoded Call</th><th>Opcode</th><th>Record ID</th><th>Block</th><th>Raw Params</th>
+                <th>Global ID</th><th>Visibility</th><th>Event</th><th>Summary</th><th>Block</th>
             </tr></thead><tbody>`;
 
         for (let i = 0; i < slice.length; i++) {
             const evt = slice[i];
             const fmt = formatEvent(evt);
-            const rawParams = evt.metaParams ? evt.metaParams.join(', ') : '-';
+            const summary = buildEventListSummary(fmt);
             const notes = fmt.notes && fmt.notes.length
                 ? `<div class="event-note">${escapeHtml(fmt.notes.join(' | '))}</div>`
                 : '';
-            html += `<tr>
+            const absoluteIndex = start + i;
+            const eventKey = getEventSelectionKey(evt);
+            const selectedClass = eventKey === selectedEventKey ? 'selected' : '';
+            html += `<tr class="event-row ${selectedClass}" data-event-key="${escapeHtml(eventKey || '')}" data-event-index="${absoluteIndex}" tabindex="0">
                 <td class="mono">${evt.pixGlobalId != null ? evt.pixGlobalId.toLocaleString() : ''}</td>
                 <td><span class="visibility-badge visibility-${escapeHtml(formatVisibility(evt))}">${escapeHtml(formatVisibility(evt))}</span></td>
                 <td><strong>${escapeHtml(fmt.name)}</strong></td>
-                <td class="mono">${escapeHtml(fmt.call)}${notes}</td>
-                <td><code>${evt.opcode}</code></td>
-                <td class="mono">${recordIdForDisplay(evt) !== '' ? String(recordIdForDisplay(evt)) : ''}</td>
+                <td class="mono" title="${escapeHtml(fmt.call)}">${escapeHtml(summary)}${notes}</td>
                 <td><span class="badge" style="background:${blockTypeColor(evt.blockType)}">${evt.blockTypeName}</span></td>
-                <td class="mono">${rawParams}</td>
             </tr>`;
         }
 
-        html += '</tbody></table></div>';
+        html += `</tbody></table></div>`;
         container.innerHTML = html;
 
         $('#prev-page')?.addEventListener('click', () => { currentPage--; renderPage(currentPage); });
@@ -546,9 +1441,33 @@ function renderEventTable(events) {
             currentSearchQuery = e.target.value || '';
             applyFilter(currentFilter);
         });
+        if (preserveTableScroll) {
+            const tableScroll = container.querySelector('.event-table-scroll');
+            if (tableScroll) {
+                tableScroll.scrollTop = previousTableScrollTop;
+                tableScroll.scrollLeft = previousTableScrollLeft;
+            }
+        }
+        container.querySelectorAll('.event-row').forEach((row) => {
+            const activate = () => {
+                selectedEventKey = row.dataset.eventKey || null;
+                const nextIndex = Number(row.dataset.eventIndex || '0');
+                currentPage = Math.floor(nextIndex / PAGE_SIZE);
+                renderPage(currentPage, { preserveTableScroll: true });
+                renderEventBrowserPanel();
+                focusWindowById('event-browser');
+            };
+            row.addEventListener('click', activate);
+            row.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    activate();
+                }
+            });
+        });
     }
 
-    renderPage(0);
+    renderPage(currentPage);
 }
 
 // Helpers

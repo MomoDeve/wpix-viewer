@@ -1,54 +1,46 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>WPix Viewer</title>
-    <link rel="stylesheet" href="style.css">
-</head>
-<body>
+    <link rel="stylesheet" href="vendor/dockview/dockview.css" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
     <div class="container">
-        <header>
-            <h1>WPix Viewer <span>PIX GPU Capture Analyzer</span></h1>
-        </header>
+      <header>
+        <h1>WPix Viewer <span>PIX GPU Capture Analyzer</span></h1>
+      </header>
 
-        <section id="upload-section">
-            <div id="drop-zone">
-                <div class="icon">&#128190;</div>
-                <strong>Drop .wpix file here</strong>
-                <p>or click to browse</p>
-            </div>
-            <input type="file" id="file-input" accept=".wpix">
-        </section>
+      <section id="upload-section">
+        <div id="drop-zone">
+          <div class="icon">&#128190;</div>
+          <strong>Drop .wpix file here</strong>
+          <p>or click to browse</p>
+        </div>
+        <input type="file" id="file-input" accept=".wpix" />
+      </section>
 
-        <div id="status"></div>
+      <div id="status"></div>
 
-        <section id="results-section">
-            <div class="panel">
-                <h2>Capture Info</h2>
-                <div id="capture-info"></div>
-            </div>
+      <section id="results-section">
+        <div class="workspace-toolbar">
+          <div class="workspace-toolbar-left">
+            <span class="workspace-pill">Workspace</span>
+            <span class="workspace-hint">Dock and split tabs.</span>
+          </div>
+          <button id="reset-layout-btn" type="button">Reset Layout</button>
+        </div>
 
-            <div class="panel">
-                <h2>Block Map</h2>
-                <div id="block-map"></div>
-            </div>
-
-            <div class="panel">
-                <h2>WPIX Resources</h2>
-                <div id="resource-table"></div>
-            </div>
-
-            <div class="panel">
-                <h2>Events</h2>
-                <div id="event-table"></div>
-            </div>
-        </section>
+        <div id="workspace-desktop" class="dockview-theme-dark"></div>
+      </section>
     </div>
 
     <script src="js/xpress.js"></script>
     <script src="js/parser.js"></script>
     <script src="js/event-decoder.js"></script>
+    <script src="vendor/dockview/dockview-core.min.noStyle.js"></script>
     <script src="js/app.js"></script>
-</body>
+  </body>
 </html>

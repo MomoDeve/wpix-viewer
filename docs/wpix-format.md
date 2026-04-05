@@ -64,14 +64,14 @@ META
 
 The following block families are especially important for D3D12 capture content:
 
-| Type | Hex | Meaning |
-| --- | --- | --- |
-| 2 | `0x02` | capture metadata |
-| 3 | `0x03` | object table |
-| 100 | `0x64` | command-list related records |
-| 300 | `0x12C` | resource debug names |
-| 1000 | `0x3E8` | Event Index |
-| 1001 | `0x3E9` | Event Details |
+| Type | Hex     | Meaning                      |
+| ---- | ------- | ---------------------------- |
+| 2    | `0x02`  | capture metadata             |
+| 3    | `0x03`  | object table                 |
+| 100  | `0x64`  | command-list related records |
+| 300  | `0x12C` | resource debug names         |
+| 1000 | `0x3E8` | Event Index                  |
+| 1001 | `0x3E9` | Event Details                |
 
 ## 6. Opcode Model
 
@@ -158,11 +158,21 @@ The application resource table is populated from WPIX content, including:
 - `1700` / `1767` resource creation records
 - compact `CopyTextureRegion` footprint data where applicable
 
-## 10. Areas Still Being Defined
+## 10. Missing D3D12 Command Coverage Status
 
-Some record families are only partially specified at the moment, including:
-
-- `RSSetViewports` payload layout
-- `RSSetScissorRects` payload layout
-- some compact descriptor/view payloads
-- some DXGI enum coverage
+- `1002` - `CopyTiles`
+- `1032` - `ClearUnorderedAccessViewUint`
+- `1033` - `ClearUnorderedAccessViewUint`
+- `1034` - `ClearUnorderedAccessViewFloat`
+- `1044` - `AtomicCopyBufferUINT`
+- `1045` - `AtomicCopyBufferUINT64`
+- `1048` - `ResolveSubresourceRegion`
+- `1053` - `EndRenderPass`
+- `1056` - `BuildRaytracingAS`
+- `1057` - `EmitRaytracingASPostbuildInfo`
+- `1058` - `CopyRaytracingAS`
+- `1066` - `CmdQueueSetMarker`
+- `1067` - `CmdQueueBeginEvent`
+- `1068` - `CmdQueueEndEvent`
+- `1071` - `GetTimestampFrequency`
+- `1072` - `GetClockCalibration`
