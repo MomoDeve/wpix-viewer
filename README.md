@@ -2,12 +2,25 @@
 
 Browser-based viewer for `.wpix` GPU capture files.
 
+![WPIX Viewer screenshot](image.png)
+
 It opens a WPIX file directly in the browser and shows:
 
 - capture metadata
 - block map
 - binary-derived resource table
 - decoded event stream with PIX-style global ordering
+- event and object browsers with cross-linked references
+
+## Warning
+
+- WPIX Viewer still has gaps in opcode coverage, compact PIX payload decoding, and record-family naming.
+- Some fields are inferred from surrounding state instead of being proven from a single record.
+- The viewer may misdecode records, omit fields, or label unknown fields too conservatively.
+
+Treat this project as a baseline for your own custom tooling, not a standalone ready-to-use application.
+
+Feel free to contribute changes if you find something missing!
 
 ## Project Layout
 
@@ -39,8 +52,10 @@ http://localhost:4173/app/
 3. Inspect:
    - `Capture Info`
    - `Block Map`
-   - `WPIX Resources`
+   - `Resources`
    - `Events`
+   - `Event Browser`
+   - `Object Browser`
 
 The events table supports:
 

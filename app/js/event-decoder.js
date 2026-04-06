@@ -1237,24 +1237,29 @@
     }
 
     function primitiveTopologyName(value) {
+        const normalized = value >>> 0;
         const names = {
+            0: 'UNDEFINED',
             1: 'POINTLIST',
             2: 'LINELIST',
             3: 'LINESTRIP',
             4: 'TRIANGLELIST',
             5: 'TRIANGLESTRIP',
-            6: 'LINELIST_ADJ',
-            7: 'LINESTRIP_ADJ',
-            8: 'TRIANGLELIST_ADJ',
-            9: 'TRIANGLESTRIP_ADJ',
-            33: '1_CONTROL_POINT_PATCHLIST',
-            34: '2_CONTROL_POINT_PATCHLIST',
-            35: '3_CONTROL_POINT_PATCHLIST',
+            6: 'TRIANGLEFAN',
+            10: 'LINELIST_ADJ',
+            11: 'LINESTRIP_ADJ',
+            12: 'TRIANGLELIST_ADJ',
+            13: 'TRIANGLESTRIP_ADJ',
         };
-        return names[value] || String(value);
+        if (Object.prototype.hasOwnProperty.call(names, normalized)) return names[normalized];
+        if (normalized >= 33 && normalized <= 64) return `${normalized - 32}_CONTROL_POINT_PATCHLIST`;
+        return String(normalized);
     }
 
-    function queueTypeName(value) {
+    function d3d12CommandListTypeName(value) {
+        if (value == null) return null;
+        const normalized = value >>> 0;
+        if (normalized === 0xFFFFFFFF) return 'NONE';
         const names = {
             0: 'DIRECT',
             1: 'BUNDLE',
@@ -1264,18 +1269,166 @@
             5: 'VIDEO_PROCESS',
             6: 'VIDEO_ENCODE',
         };
-        return names[value] || String(value);
+        return Object.prototype.hasOwnProperty.call(names, normalized) ? names[normalized] : String(normalized);
+    }
+
+    function queueTypeName(value) {
+        return d3d12CommandListTypeName(value);
+    }
+
+    function d3d12CommandQueuePriorityName(value) {
+        if (value == null) return null;
+        const normalized = value >>> 0;
+        const names = {
+            0: 'NORMAL',
+            100: 'HIGH',
+            10000: 'GLOBAL_REALTIME',
+        };
+        return Object.prototype.hasOwnProperty.call(names, normalized) ? names[normalized] : String(normalized);
+    }
+
+    function d3d12CommandQueueFlagsName(value) {
+        if (value == null) return null;
+        const normalized = value >>> 0;
+        if (normalized === 0) return 'NONE';
+        const bits = [
+            [0x1, 'DISABLE_GPU_TIMEOUT'],
+        ];
+        const names = [];
+        for (const [bit, label] of bits) {
+            if ((normalized & bit) !== 0) names.push(label);
+        }
+        const knownMask = bits.reduce((acc, [bit]) => acc | bit, 0);
+        const remaining = normalized & ~knownMask;
+        if (remaining) names.push(`0x${remaining.toString(16)}`);
+        return names.join(' | ');
     }
 
     function dxgiFormatName(value) {
         const names = {
             0: 'UNKNOWN',
+            1: 'R32G32B32A32_TYPELESS',
+            2: 'R32G32B32A32_FLOAT',
+            3: 'R32G32B32A32_UINT',
+            4: 'R32G32B32A32_SINT',
+            5: 'R32G32B32_TYPELESS',
+            6: 'R32G32B32_FLOAT',
+            7: 'R32G32B32_UINT',
+            8: 'R32G32B32_SINT',
+            9: 'R16G16B16A16_TYPELESS',
             10: 'R16G16B16A16_FLOAT',
+            11: 'R16G16B16A16_UNORM',
+            12: 'R16G16B16A16_UINT',
+            13: 'R16G16B16A16_SNORM',
+            14: 'R16G16B16A16_SINT',
+            15: 'R32G32_TYPELESS',
+            16: 'R32G32_FLOAT',
+            17: 'R32G32_UINT',
+            18: 'R32G32_SINT',
+            19: 'R32G8X24_TYPELESS',
+            20: 'D32_FLOAT_S8X24_UINT',
+            21: 'R32_FLOAT_X8X24_TYPELESS',
+            22: 'X32_TYPELESS_G8X24_UINT',
+            23: 'R10G10B10A2_TYPELESS',
+            24: 'R10G10B10A2_UNORM',
+            25: 'R10G10B10A2_UINT',
+            26: 'R11G11B10_FLOAT',
+            27: 'R8G8B8A8_TYPELESS',
             28: 'R8G8B8A8_UNORM',
-            40: 'D32_FLOAT_S8X24_UINT',
+            29: 'R8G8B8A8_UNORM_SRGB',
+            30: 'R8G8B8A8_UINT',
+            31: 'R8G8B8A8_SNORM',
+            32: 'R8G8B8A8_SINT',
+            33: 'R16G16_TYPELESS',
+            34: 'R16G16_FLOAT',
+            35: 'R16G16_UNORM',
+            36: 'R16G16_UINT',
+            37: 'R16G16_SNORM',
+            38: 'R16G16_SINT',
+            39: 'R32_TYPELESS',
+            40: 'D32_FLOAT',
             41: 'R32_FLOAT',
+            42: 'R32_UINT',
+            43: 'R32_SINT',
+            44: 'R24G8_TYPELESS',
+            45: 'D24_UNORM_S8_UINT',
+            46: 'R24_UNORM_X8_TYPELESS',
+            47: 'X24_TYPELESS_G8_UINT',
+            48: 'R8G8_TYPELESS',
+            49: 'R8G8_UNORM',
+            50: 'R8G8_UINT',
+            51: 'R8G8_SNORM',
+            52: 'R8G8_SINT',
+            53: 'R16_TYPELESS',
+            54: 'R16_FLOAT',
+            55: 'D16_UNORM',
+            56: 'R16_UNORM',
+            57: 'R16_UINT',
+            58: 'R16_SNORM',
+            59: 'R16_SINT',
+            60: 'R8_TYPELESS',
             61: 'R8_UNORM',
+            62: 'R8_UINT',
+            63: 'R8_SNORM',
+            64: 'R8_SINT',
+            65: 'A8_UNORM',
+            66: 'R1_UNORM',
+            67: 'R9G9B9E5_SHAREDEXP',
+            68: 'R8G8_B8G8_UNORM',
+            69: 'G8R8_G8B8_UNORM',
+            70: 'BC1_TYPELESS',
+            71: 'BC1_UNORM',
+            72: 'BC1_UNORM_SRGB',
+            73: 'BC2_TYPELESS',
+            74: 'BC2_UNORM',
+            75: 'BC2_UNORM_SRGB',
+            76: 'BC3_TYPELESS',
+            77: 'BC3_UNORM',
+            78: 'BC3_UNORM_SRGB',
+            79: 'BC4_TYPELESS',
+            80: 'BC4_UNORM',
+            81: 'BC4_SNORM',
+            82: 'BC5_TYPELESS',
+            83: 'BC5_UNORM',
+            84: 'BC5_SNORM',
+            85: 'B5G6R5_UNORM',
+            86: 'B5G5R5A1_UNORM',
             87: 'B8G8R8A8_UNORM',
+            88: 'B8G8R8X8_UNORM',
+            89: 'R10G10B10_XR_BIAS_A2_UNORM',
+            90: 'B8G8R8A8_TYPELESS',
+            91: 'B8G8R8A8_UNORM_SRGB',
+            92: 'B8G8R8X8_TYPELESS',
+            93: 'B8G8R8X8_UNORM_SRGB',
+            94: 'BC6H_TYPELESS',
+            95: 'BC6H_UF16',
+            96: 'BC6H_SF16',
+            97: 'BC7_TYPELESS',
+            98: 'BC7_UNORM',
+            99: 'BC7_UNORM_SRGB',
+            100: 'AYUV',
+            101: 'Y410',
+            102: 'Y416',
+            103: 'NV12',
+            104: 'P010',
+            105: 'P016',
+            106: '420_OPAQUE',
+            107: 'YUY2',
+            108: 'Y210',
+            109: 'Y216',
+            110: 'NV11',
+            111: 'AI44',
+            112: 'IA44',
+            113: 'P8',
+            114: 'A8P8',
+            115: 'B4G4R4A4_UNORM',
+            130: 'P208',
+            131: 'V208',
+            132: 'V408',
+            189: 'SAMPLER_FEEDBACK_MIN_MIP_OPAQUE',
+            190: 'SAMPLER_FEEDBACK_MIP_REGION_USED_OPAQUE',
+            191: 'A4B4G4R4_UNORM',
+            0xffffffff: 'FORCE_UINT',
         };
         return names[value] || `DXGI_FORMAT_${value}`;
     }
@@ -1296,8 +1449,19 @@
             6: 'SO_STATISTICS_STREAM2',
             7: 'SO_STATISTICS_STREAM3',
             8: 'VIDEO_DECODE_STATISTICS',
+            10: 'PIPELINE_STATISTICS1',
         };
         return names[value] || String(value);
+    }
+
+    function d3d12PredicationOpName(value) {
+        if (value == null) return null;
+        const normalized = value >>> 0;
+        const names = {
+            0: 'EQUAL_ZERO',
+            1: 'NOT_EQUAL_ZERO',
+        };
+        return Object.prototype.hasOwnProperty.call(names, normalized) ? names[normalized] : String(normalized);
     }
 
     function d3d12ResourceDimensionName(value) {
@@ -1332,6 +1496,8 @@
             [0x10, 'ALLOW_CROSS_ADAPTER'],
             [0x20, 'ALLOW_SIMULTANEOUS_ACCESS'],
             [0x40, 'VIDEO_DECODE_REFERENCE_ONLY'],
+            [0x80, 'VIDEO_ENCODE_REFERENCE_ONLY'],
+            [0x100, 'RAYTRACING_ACCELERATION_STRUCTURE'],
         ];
         const names = [];
         for (const [bit, label] of bits) {
@@ -1362,8 +1528,19 @@
             [0x800, 'COPY_SOURCE'],
             [0x1000, 'RESOLVE_DEST'],
             [0x2000, 'RESOLVE_SOURCE'],
-            [0x4000, 'RAYTRACING_ACCELERATION_STRUCTURE'],
-            [0x8000, 'SHADING_RATE_SOURCE'],
+            [0x4000, 'RESERVED_INTERNAL_4000'],
+            [0x8000, 'RESERVED_INTERNAL_8000'],
+            [0x10000, 'VIDEO_DECODE_READ'],
+            [0x20000, 'VIDEO_DECODE_WRITE'],
+            [0x40000, 'VIDEO_PROCESS_READ'],
+            [0x80000, 'VIDEO_PROCESS_WRITE'],
+            [0x100000, 'RESERVED_INTERNAL_100000'],
+            [0x200000, 'VIDEO_ENCODE_READ'],
+            [0x400000, 'RAYTRACING_ACCELERATION_STRUCTURE'],
+            [0x800000, 'VIDEO_ENCODE_WRITE'],
+            [0x1000000, 'SHADING_RATE_SOURCE'],
+            [0x40000000, 'RESERVED_INTERNAL_40000000'],
+            [0x80000000, 'RESERVED_INTERNAL_80000000'],
         ];
 
         const names = bits
@@ -1392,8 +1569,19 @@
             [0x800, 'D3D12_RESOURCE_STATE_COPY_SOURCE'],
             [0x1000, 'D3D12_RESOURCE_STATE_RESOLVE_DEST'],
             [0x2000, 'D3D12_RESOURCE_STATE_RESOLVE_SOURCE'],
-            [0x4000, 'D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE'],
-            [0x8000, 'D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE'],
+            [0x4000, 'D3D12_RESOURCE_STATE_RESERVED_INTERNAL_4000'],
+            [0x8000, 'D3D12_RESOURCE_STATE_RESERVED_INTERNAL_8000'],
+            [0x10000, 'D3D12_RESOURCE_STATE_VIDEO_DECODE_READ'],
+            [0x20000, 'D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE'],
+            [0x40000, 'D3D12_RESOURCE_STATE_VIDEO_PROCESS_READ'],
+            [0x80000, 'D3D12_RESOURCE_STATE_VIDEO_PROCESS_WRITE'],
+            [0x100000, 'D3D12_RESOURCE_STATE_RESERVED_INTERNAL_100000'],
+            [0x200000, 'D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ'],
+            [0x400000, 'D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE'],
+            [0x800000, 'D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE'],
+            [0x1000000, 'D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE'],
+            [0x40000000, 'D3D12_RESOURCE_STATE_RESERVED_INTERNAL_40000000'],
+            [0x80000000, 'D3D12_RESOURCE_STATE_RESERVED_INTERNAL_80000000'],
         ];
 
         const names = bits
@@ -1401,6 +1589,34 @@
             .map(([, name]) => name);
 
         return names.length > 0 ? names.join('|') : `0x${(value >>> 0).toString(16)}`;
+    }
+
+    function d3d12ShadingRateName(value) {
+        if (value == null) return null;
+        const normalized = value >>> 0;
+        const names = {
+            0x0: '1X1',
+            0x1: '1X2',
+            0x4: '2X1',
+            0x5: '2X2',
+            0x6: '2X4',
+            0x9: '4X2',
+            0xA: '4X4',
+        };
+        return Object.prototype.hasOwnProperty.call(names, normalized) ? names[normalized] : `0x${normalized.toString(16)}`;
+    }
+
+    function d3d12HeapTypeName(value) {
+        if (value == null) return null;
+        const normalized = value >>> 0;
+        const names = {
+            1: 'DEFAULT',
+            2: 'UPLOAD',
+            3: 'READBACK',
+            4: 'CUSTOM',
+            5: 'GPU_UPLOAD',
+        };
+        return Object.prototype.hasOwnProperty.call(names, normalized) ? names[normalized] : null;
     }
 
     function d3d12SubresourceName(value) {
@@ -1531,12 +1747,41 @@
         switch (opcode) {
             case 992:
                 addCommonThisArg(args, meta, ctx);
-                if (a != null && a !== 0) pushArg(args, 'TypeRaw', a);
-                return result(name, args, ['GetType is stored in a compact PIX form in this capture; only the object id is currently decoded when the type word is zero.']);
+                if (a != null) {
+                    pushArg(args, 'TypeRaw', a);
+                    pushArg(args, 'Type', a, d3d12CommandListTypeName(a));
+                    return result(name, args, ['GetType is stored in a compact PIX form in this capture; the type enum is decoded from the packed metadata word.']);
+                }
+                return result(name, args, ['GetType is stored in a compact PIX form in this capture; this record did not expose a type word beyond the object id.']);
             case 993:
                 addCommonThisArg(args, meta, ctx);
-                if (b != null && b !== 0) pushArg(args, 'CloseToken', b);
-                return result(name, args, b ? ['Close includes an additional PIX close token/object reference in this capture.'] : []);
+                pushArg(args, 'returnValue', 'S_OK', 'S_OK');
+                return result(
+                    'Close',
+                    args,
+                    ['Close is decoded from the compact WPIX method form. The successful HRESULT return value is inferred as S_OK for this compact success path. Additional packed metadata words in this form are currently ignored until their meaning is identified.'],
+                    'Close()',
+                );
+            case 994:
+                addCommonThisArg(args, meta, ctx);
+                pushArg(args, 'returnValue', 'S_OK', 'S_OK');
+                if (a != null) pushArg(args, 'pAllocator', a, formatObj(a, ctx));
+                if (b == null || b === 0) {
+                    pushArg(args, 'pInitialState', 'nullptr', 'nullptr');
+                    return result(
+                        name,
+                        args,
+                        ['Reset is decoded from the compact WPIX method form. The successful HRESULT return value is inferred as S_OK for this compact success path; pInitialState is treated as nullptr when the packed word is zero or omitted.'],
+                        `Reset(pAllocator:${a != null ? formatObj(a, ctx) : 'nullptr'}, pInitialState:nullptr)`,
+                    );
+                }
+                pushArg(args, 'pInitialState', b, formatObj(b, ctx));
+                return result(
+                    name,
+                    args,
+                    ['Reset is decoded from the compact WPIX method form. The successful HRESULT return value is inferred as S_OK for this compact success path.'],
+                    `Reset(pAllocator:${a != null ? formatObj(a, ctx) : 'nullptr'}, pInitialState:${formatObj(b, ctx)})`,
+                );
             case 996:
                 addCommonThisArg(args, meta, ctx);
                 pushArg(args, 'IndexCountPerInstance', a);
@@ -1893,13 +2138,22 @@
                 }
             case 1039:
                 addCommonThisArg(args, meta, ctx);
-                pushArg(args, 'pBuffer', a, formatObj(a, ctx));
+                if (a == null || a === 0) {
+                    pushArg(args, 'pBuffer', 'nullptr', 'nullptr');
+                } else {
+                    pushArg(args, 'pBuffer', a, formatObj(a, ctx));
+                }
+                if (b != null) pushArg(args, 'AlignedBufferOffset', b);
+                if (c != null) pushArg(args, 'Operation', c, `D3D12_PREDICATION_OP_${d3d12PredicationOpName(c)}`);
                 return result(name, args);
             case 1040:
             case 1041:
                 addCommonThisArg(args, meta, ctx);
                 if (evt.userString === 'PreDraw') {
                     return result('PreDraw', args, ['PreDraw is emitted as a PIX marker/event string in this capture.']);
+                }
+                if (evt.userString === 'PrepareForPresent') {
+                    return result('PrepareForPresent', args, ['PrepareForPresent is emitted as a PIX marker/event string in this capture.'], 'PrepareForPresent()');
                 }
                 if (evt.userString) pushArg(args, 'Text', evt.userString);
                 return result(name, args);
@@ -1932,7 +2186,7 @@
                 return result(name, args);
             case 1061:
                 addCommonThisArg(args, meta, ctx);
-                pushArg(args, 'BaseShadingRate', a);
+                pushArg(args, 'BaseShadingRate', a, `D3D12_SHADING_RATE_${d3d12ShadingRateName(a)}`);
                 return result(name, args);
             case 1064:
                 addCommonThisArg(args, meta, ctx);
@@ -1986,14 +2240,20 @@
                     pushArg(args, 'QueueTypeRaw', evt.queueTypeRaw);
                     pushArg(args, 'QueueType', queueTypeName(evt.queueTypeRaw), queueTypeName(evt.queueTypeRaw));
                 }
-                if (evt.queueField1 != null) pushArg(args, 'QueueField1', evt.queueField1);
-                if (evt.queueField2 != null) pushArg(args, 'QueueField2', evt.queueField2);
+                if (evt.queueField1 != null) {
+                    pushArg(args, 'QueuePriorityRaw', evt.queueField1);
+                    pushArg(args, 'QueuePriority', evt.queueField1, `D3D12_COMMAND_QUEUE_PRIORITY_${d3d12CommandQueuePriorityName(evt.queueField1)}`);
+                }
+                if (evt.queueField2 != null) {
+                    pushArg(args, 'QueueFlagsRaw', evt.queueField2, `0x${(evt.queueField2 >>> 0).toString(16).padStart(8, '0')}`);
+                    pushArg(args, 'QueueFlags', evt.queueField2, `D3D12_COMMAND_QUEUE_FLAG_${d3d12CommandQueueFlagsName(evt.queueField2).replace(/ \| /g, '|D3D12_COMMAND_QUEUE_FLAG_')}`);
+                }
                 if (evt.queueNodeMaskRaw != null) pushArg(args, 'NodeMaskRaw', evt.queueNodeMaskRaw, `0x${(evt.queueNodeMaskRaw >>> 0).toString(16).padStart(8, '0')}`);
                 const normalizedNodeMask = normalizeQueueNodeMask(evt.queueNodeMaskRaw);
                 if (normalizedNodeMask != null) pushArg(args, 'NodeMask', normalizedNodeMask, `0x${(normalizedNodeMask >>> 0).toString(16).padStart(8, '0')}`);
                 if (evt.objectGuid) pushArg(args, 'InterfaceGuid', evt.objectGuid);
                 if (evt.objectGuid) pushArg(args, 'Interface', getInterfaceName(evt.objectGuid), getInterfaceName(evt.objectGuid));
-                return result(name, args, ['QueueType and NodeMask are derived from the WPIX queue record. QueueField1/QueueField2 remain unnamed until they can be matched unambiguously to PIX queue properties.']);
+                return result(name, args, ['QueueType, QueuePriority, QueueFlags, and NodeMask are decoded from the WPIX queue record using D3D12_COMMAND_QUEUE_DESC field ordering.']);
             case 1076:
             case 1095:
             case 1103:
@@ -2026,7 +2286,11 @@
                 pushArg(args, 'RecordId', evt.param1);
                 if (meta[1] != null) pushArg(args, 'ObjectId', meta[1], formatObj(meta[1], ctx));
                 pushArg(args, 'CreationType', 'Committed', 'Committed');
-                if (meta[2] != null) pushArg(args, 'HeapTypeToken', meta[2]);
+                if (meta[2] != null) {
+                    pushArg(args, 'HeapTypeRaw', meta[2]);
+                    const heapTypeName = d3d12HeapTypeName(meta[2]);
+                    if (heapTypeName) pushArg(args, 'HeapType', meta[2], `D3D12_HEAP_TYPE_${heapTypeName}`);
+                }
                 if (evt.resourceDesc) {
                     pushArg(args, 'Dimension', evt.resourceDesc.dimensionRaw, d3d12ResourceDimensionName(evt.resourceDesc.dimensionRaw));
                     if (evt.resourceDesc.alignment != null) pushArg(args, 'Alignment', evt.resourceDesc.alignment);
@@ -2041,7 +2305,7 @@
                 }
                 if (meta[3] != null) pushArg(args, 'Meta3', meta[3]);
                 if (meta[4] != null) pushArg(args, 'Meta4', meta[4]);
-                return result(name, args, ['This WPIX record family appears to describe committed resources. HeapTypeToken is kept conservative until the remaining committed-resource metadata is decoded.']);
+                return result(name, args, ['This WPIX record family appears to describe committed resources. HeapType is decoded when the committed-resource token matches a standard D3D12_HEAP_TYPE value; any remaining committed-resource metadata stays conservative.']);
             case 1566:
                 pushArg(args, 'PayloadSize', evt.dataSize);
                 if (evt.embeddedStrings && evt.embeddedStrings.length) pushArg(args, 'Strings', evt.embeddedStrings);

@@ -6,8 +6,8 @@ let headerInfo = null;
 let captureMetadata = null;
 let allEvents = [];
 let filteredEvents = [];
-let currentFilter = 'pix'; // 'api' = event index+details, 'pix' = GPU-visible PIX-like order, 'all' = everything
-let resourceNames = new Map(); // obj# → debug name string
+let currentFilter = 'pix'; // 'api' = API-facing event rows, 'pix' = GPU-visible PIX-like order, 'all' = everything
+let resourceNames = new Map(); // obj# -> debug name string
 
 let eventDetailsByRecordId = new Map();
 let objectInfo = new Map();
@@ -41,6 +41,57 @@ function getPixSortKey(evt) {
     if (evt.recordId != null && Number.isFinite(evt.recordId)) return evt.recordId;
     if (evt.sequence != null && Number.isFinite(evt.sequence)) return 1000000000 + evt.sequence;
     return Number.MAX_SAFE_INTEGER;
+}
+
+function synthesizePrepareForPresentEvents(events, queueMetadata) {
+    const sourceEvents = Array.isArray(events) ? events : [];
+    if (sourceEvents.length === 0 || !queueMetadata || typeof queueMetadata.get !== 'function') {
+        return sourceEvents;
+    }
+
+    const candidateQueues = new Set(
+        [...queueMetadata.values()]
+            .filter((queue) =>
+                queue &&
+                queue.queueType === 'DIRECT' &&
+                queue.counts &&
+                queue.counts.Present === 2 &&
+                Array.isArray(queue.commandLists) &&
+                queue.commandLists.length === 1 &&
+                Array.isArray(queue.presents) &&
+                queue.presents.length === 1)
+            .map((queue) => Number(queue.objectId)),
+    );
+
+    if (candidateQueues.size === 0) return sourceEvents;
+
+    const output = [];
+    let syntheticIndex = 0;
+    for (const evt of sourceEvents) {
+        const meta0 = Array.isArray(evt.metaParams) ? evt.metaParams[0] : null;
+        if (evt.opcode === 1885 && meta0 != null && candidateQueues.has(Number(meta0))) {
+            syntheticIndex += 1;
+            output.push({
+                opcode: 1040,
+                opcodeName: 'SetMarker',
+                userString: 'PrepareForPresent',
+                sequence: (evt.sequence != null ? evt.sequence : output.length + 1) - 0.25,
+                blockIndex: evt.blockIndex,
+                blockType: evt.blockType,
+                blockTypeName: evt.blockTypeName,
+                metaParams: [meta0, 0, 0, 0, 0],
+                coreMetaParams: [meta0],
+                syntheticKind: 'PrepareForPresent',
+                syntheticSourceSequence: evt.sequence != null ? evt.sequence : null,
+                syntheticId: syntheticIndex,
+                dataSize: 0,
+                payloadSize: 0,
+            });
+        }
+        output.push(evt);
+    }
+
+    return output;
 }
 
 function $(sel) { return document.querySelector(sel); }
@@ -153,7 +204,7 @@ function renderWorkspacePanelById(panelId) {
         renderResourceTable(resourceInfo);
         break;
     case 'events':
-        applyFilter(currentFilter || 'pix');
+        applyFilter(currentFilter || 'pix', { refreshRelatedPanels: false });
         break;
     case 'event-browser':
         renderEventBrowserPanel();
@@ -447,6 +498,8 @@ async function handleFile(file) {
             .filter((evt) => evt.blockType === 0x3E9 && evt.param1 != null)
             .map((evt) => [evt.param1, evt]),
     );
+    const initialQueueInfo = WPixEventDecoder.buildQueueInfo(allEvents);
+    allEvents = synthesizePrepareForPresentEvents(allEvents, initialQueueInfo);
     objectInfo = WPixEventDecoder.buildObjectInfo(allEvents, { resourceNames });
     queueInfo = WPixEventDecoder.buildQueueInfo(allEvents);
     resourceInfo = WPixEventDecoder.buildResourceInfo(allEvents, { objectInfo, resourceNames });
@@ -457,6 +510,8 @@ async function handleFile(file) {
     pixBundleInfo = WPixEventDecoder.buildPixBundleInfo(allEvents);
     bufferViewInfo = WPixEventDecoder.buildBufferViewInfo(allEvents, descriptorInfo);
     rasterStateInfo = WPixEventDecoder.buildRasterStateInfo(allEvents, { resourceInfo });
+    currentFilter = 'pix';
+    currentSearchQuery = '';
     selectedEventKey = null;
     selectedObjectId = null;
 
@@ -493,20 +548,16 @@ async function handleFile(file) {
     ensureDockviewWorkspace();
     if (!dockviewApi || dockviewApi.totalPanels === 0) {
         resetWorkspaceLayout();
+    } else {
+        refreshWorkspacePanels();
     }
-
-    renderCaptureInfo(headerInfo, captureMetadata, directory, allEvents, objectInfo, queueInfo);
-    renderBlockMap(directory);
-    renderResourceTable(resourceInfo);
-    applyFilter('pix');
-    renderObjectBrowserPanel();
     requestAnimationFrame(() => {
         if (dockviewApi && canMeasureWorkspace()) {
             dockviewApi.layout($('#workspace-desktop').clientWidth, $('#workspace-desktop').clientHeight, true);
         }
         focusWindowById('events');
     });
-    showStatus(`${allEvents.length.toLocaleString()} events • ${directory.length} blocks`);
+    showStatus(`${allEvents.length.toLocaleString()} events, ${directory.length} blocks`);
 }
 
 function buildResourceRows(resources) {
@@ -763,10 +814,9 @@ function openEventWindowByRecordId(recordId) {
     const isVisibleInCurrentView = filteredEvents.some((candidate) => getEventSelectionKey(candidate) === selectedEventKey);
     if (!isVisibleInCurrentView) {
         currentSearchQuery = '';
-        applyFilter(evt.isPixGpuVisible ? 'pix' : 'all');
+        applyFilter(evt.isPixGpuVisible ? 'pix' : 'all', { refreshRelatedPanels: false });
     } else {
         renderEventTable(filteredEvents);
-        renderEventBrowserPanel();
     }
     focusWindowById('events');
     renderEventBrowserPanel();
@@ -868,7 +918,7 @@ function renderArgumentTreeValue(value, fallbackDisplay, depth = 0, keyName = ''
                         <div class="arg-tree-node">
                             <div class="arg-tree-row ${isArgumentTreeBranchValue(entry) ? 'arg-tree-row-branch' : 'arg-tree-row-leaf'}">
                                 <span class="arg-tree-key mono">[${index}]</span>
-                                <div class="arg-tree-value">${renderArgumentTreeValue(entry, null, depth + 1, '')}</div>
+                                <div class="arg-tree-value">${renderArgumentTreeValue(entry, null, depth + 1, keyName)}</div>
                             </div>
                         </div>
                     `).join('')}
@@ -1335,17 +1385,15 @@ function matchesEventSearch(evt, query) {
     return haystack.includes(trimmed.toLowerCase());
 }
 
-function applyFilter(filter) {
+function applyFilter(filter, options = {}) {
+    const refreshRelatedPanels = options.refreshRelatedPanels !== false;
     currentFilter = filter;
     filteredEvents = getBaseFilteredEvents(filter).filter((evt) => matchesEventSearch(evt, currentSearchQuery));
     renderEventTable(filteredEvents);
-    renderEventBrowserPanel();
-    renderObjectBrowserPanel();
-
-    // Update active button
-    document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
-    const activeBtn = document.querySelector(`.filter-btn[data-filter="${filter}"]`);
-    if (activeBtn) activeBtn.classList.add('active');
+    if (refreshRelatedPanels) {
+        renderEventBrowserPanel();
+        renderObjectBrowserPanel();
+    }
 }
 
 function renderCaptureInfo(header, metadata, dir, events, objInfo, queues) {
@@ -1452,6 +1500,25 @@ function renderEventTable(events) {
     const container = $('#event-table');
     const PAGE_SIZE = 200;
     if (!container) return;
+    const activeElement = document.activeElement;
+    const shouldRestoreSearchFocus = activeElement && activeElement.id === 'event-search';
+    const searchSelectionStart = shouldRestoreSearchFocus && typeof activeElement.selectionStart === 'number'
+        ? activeElement.selectionStart
+        : null;
+    const searchSelectionEnd = shouldRestoreSearchFocus && typeof activeElement.selectionEnd === 'number'
+        ? activeElement.selectionEnd
+        : null;
+
+    const restoreSearchFocus = () => {
+        if (!shouldRestoreSearchFocus) return;
+        const input = $('#event-search');
+        if (!input) return;
+        input.focus();
+        if (searchSelectionStart != null && searchSelectionEnd != null) {
+            input.setSelectionRange(searchSelectionStart, searchSelectionEnd);
+        }
+    };
+
     if (!events || events.length === 0) {
         selectedEventKey = null;
         container.innerHTML = `
@@ -1475,6 +1542,7 @@ function renderEventTable(events) {
             currentSearchQuery = e.target.value || '';
             applyFilter(currentFilter);
         });
+        restoreSearchFocus();
         return;
     }
 
@@ -1551,6 +1619,7 @@ function renderEventTable(events) {
             currentSearchQuery = e.target.value || '';
             applyFilter(currentFilter);
         });
+        restoreSearchFocus();
         if (preserveTableScroll) {
             const tableScroll = container.querySelector('.event-table-scroll');
             if (tableScroll) {

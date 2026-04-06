@@ -2,6 +2,19 @@
 
 This document summarizes the file structure and record families currently identified in WPIX files.
 
+## Status And Confidence
+
+`wpix-viewer` does not fully decode WPIX. These notes describe the current working model used by the parser and viewer.
+
+Important caveats:
+
+- some record families are only partially understood
+- some command decodes rely on compact PIX-specific payload patterns
+- some values are inferred from surrounding state instead of being proven from one record alone
+- different captures may contain forms the current parser still does not handle
+
+The viewer is useful, but it is still incomplete and may contain mistakes.
+
 ## 1. File Layout
 
 Known top-level structure:
@@ -88,7 +101,82 @@ Examples:
   - many methods appear in the `99x` through `10xx` range
   - some payloads use compact PIX-specific layouts
 
-## 7. Object and Name Records
+## 7. Current Decode Coverage
+
+This is the current practical support status of the viewer, not a guarantee that every capture will decode the same way.
+
+### Parsed Reliably Enough To Be Useful
+
+- file header / footer markers
+- block directory
+- `BLOKCOMP` and `BLOKDATA`
+- event envelopes and metadata words
+- capture metadata strings
+- object records with interface GUID typing
+- resource debug-name records
+- queue records
+- committed and placed resource records
+- binary-derived resource table
+- PIX-style GPU-visible ordering used by the app
+
+### D3D12 Commands With Meaningful Decode Coverage
+
+Commonly useful decode coverage exists for many events in tested captures, including:
+
+- `GetType`
+- `Close`
+- `Reset`
+- `DrawInstanced`
+- `DrawIndexedInstanced`
+- `Dispatch`
+- `CopyBufferRegion`
+- `CopyTextureRegion`
+- `CopyResource`
+- `IASetPrimitiveTopology`
+- `RSSetScissorRects`
+- `RSSetViewports`
+- `OMSetBlendFactor` common forms
+- `SetPipelineState`
+- `ResourceBarrier` compact transition form
+- `ExecuteBundle`
+- `SetDescriptorHeaps`
+- root signature / root table / root constant / root descriptor bindings
+- `IASetIndexBuffer`
+- `IASetVertexBuffers`
+- `OMSetRenderTargets` common compact forms
+- `ClearDepthStencilView`
+- `ClearRenderTargetView`
+- `BeginQuery`
+- `EndQuery`
+- inferred `ResolveQueryData`
+- `SetPredication`
+- marker / begin-event string records including `PrepareForPresent`
+- `ExecuteIndirect` partial surface decode
+- `OMSetDepthBounds`
+- `SetSamplePositions` partial surface decode
+- `SetViewInstanceMask`
+- `WriteBufferImmediate` partial surface decode
+- `BeginRenderPass` partial surface decode
+- `RSSetShadingRate`
+- `ExecuteCommandLists`
+- `Signal`
+- `Wait`
+- `Present`
+- PIX internal command-list bundle records used by the app
+
+### Partial / Heuristic Areas
+
+These are recognized, but not fully decoded:
+
+- compact viewport and scissor encodings outside the proven forms
+- compact descriptor payloads
+- compact render-target binding payloads
+- non-zero `OMSetBlendFactor` forms outside the known form
+- PIX internal marker payloads
+- some object / heap / resource metadata fields still exposed conservatively
+- synthetic or inferred helper events, such as the app's current `PrepareForPresent` insertion for known present patterns
+
+## 8. Object and Name Records
 
 Object typing is associated with:
 
@@ -100,7 +188,7 @@ Examples of object labels:
 - `obj#8 <ID3D12GraphicsCommandList4>`
 - `obj#110 <ID3D12Heap>`
 
-## 8. Resource Record Families
+## 9. Resource Record Families
 
 Two record families are currently associated with resource creation data.
 
@@ -109,7 +197,7 @@ Two record families are currently associated with resource creation data.
 Current interpretation:
 
 - `meta[1]` = object id
-- `meta[2]` = heap-type token
+- `meta[2]` = heap-type token, often decodable to a standard `D3D12_HEAP_TYPE`
 - resource description starts 12 bytes into the payload
 
 Fields identified in the payload:
@@ -149,7 +237,7 @@ Fields identified in the payload:
 - heap object
 - heap offset
 
-## 9. Resource Data Used by the App
+## 10. Resource Data Used by the App
 
 The application resource table is populated from WPIX content, including:
 
@@ -158,7 +246,11 @@ The application resource table is populated from WPIX content, including:
 - `1700` / `1767` resource creation records
 - compact `CopyTextureRegion` footprint data where applicable
 
-## 10. Missing D3D12 Command Coverage Status
+## 11. Missing Or Incomplete D3D12 Coverage
+
+The following areas are still missing dedicated support or are not decoded deeply enough yet.
+
+### Missing Dedicated Coverage
 
 - `1002` - `CopyTiles`
 - `1032` - `ClearUnorderedAccessViewUint`
@@ -176,3 +268,12 @@ The application resource table is populated from WPIX content, including:
 - `1068` - `CmdQueueEndEvent`
 - `1071` - `GetTimestampFrequency`
 - `1072` - `GetClockCalibration`
+
+### Still Partial In Current Builds
+
+- compact `OMSetRenderTargets`
+- compact `SOSetTargets`
+- compact `IASetIndexBuffer` / `IASetVertexBuffers` variants not seen in tested captures
+- compact marker / event payload forms
+- some queue / object / heap / resource record metadata fields
+- uncommon PIX internal record families
