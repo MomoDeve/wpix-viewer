@@ -927,6 +927,84 @@ function renderInspectorJson(value, emptyMessage) {
     return `<pre class="event-json">${escapeHtml(JSON.stringify(value, null, 2))}</pre>`;
 }
 
+function normalizeArgumentName(name) {
+    return String(name || '').trim().toLowerCase();
+}
+
+function isSecondaryDecodedArgument(arg, allArgs) {
+    const name = normalizeArgumentName(arg?.name);
+    if (!name) return false;
+    if (name === 'this') return true;
+
+    if (name.startsWith('num') && name.length > 3) {
+        const suffix = name.slice(3);
+        const hasRelatedPointerArg = allArgs.some((candidate) => {
+            const candidateName = normalizeArgumentName(candidate?.name);
+            return candidateName === `p${suffix}` || candidateName === `pp${suffix}` || candidateName.endsWith(suffix);
+        });
+        if (hasRelatedPointerArg) return true;
+    }
+
+    if (name.endsWith('count') && name.length > 5) {
+        const suffix = name.slice(0, -5);
+        const hasRelatedCollectionArg = allArgs.some((candidate) => {
+            const candidateName = normalizeArgumentName(candidate?.name);
+            return candidateName !== name && suffix && candidateName.includes(suffix);
+        });
+        if (hasRelatedCollectionArg) return true;
+    }
+
+    return false;
+}
+
+function getPrimaryDecodedArguments(args) {
+    const list = Array.isArray(args) ? args.filter(Boolean) : [];
+    const primary = list.filter((arg) => !isSecondaryDecodedArgument(arg, list));
+    return primary.length > 0 ? primary : list.filter((arg) => normalizeArgumentName(arg?.name) !== 'this');
+}
+
+function getEventTargetDisplay(evt, args) {
+    if (evt?.objectId != null && Number.isFinite(Number(evt.objectId))) {
+        return `obj#${Number(evt.objectId)}`;
+    }
+
+    const thisArg = (Array.isArray(args) ? args : []).find((arg) => normalizeArgumentName(arg?.name) === 'this');
+    if (!thisArg) return '';
+    if (thisArg.display != null && String(thisArg.display).trim()) return String(thisArg.display);
+    if (thisArg.value != null) return String(thisArg.value);
+    return '';
+}
+
+function buildEventOverviewFacts(evt, args) {
+    const facts = [];
+    const target = getEventTargetDisplay(evt, args);
+    if (target) facts.push({ label: 'Target', value: target });
+    if (evt?.userString) facts.push({ label: 'Label', value: evt.userString });
+    if (evt?.embeddedStrings && evt.embeddedStrings.length === 1) {
+        facts.push({ label: 'String', value: evt.embeddedStrings[0] });
+    } else if (evt?.embeddedStrings && evt.embeddedStrings.length > 1) {
+        facts.push({ label: 'Strings', value: evt.embeddedStrings.join(' | ') });
+    }
+    if (evt?.pixGlobalId != null) facts.push({ label: 'Global ID', value: evt.pixGlobalId, mono: true });
+    return facts;
+}
+
+function buildEventStructuredFieldGroups(evt) {
+    const fields = buildStructuredEventFields(evt);
+    const important = {};
+    const lowLevel = {};
+
+    for (const [key, value] of Object.entries(fields)) {
+        if (/(raw|word)$/i.test(key)) {
+            lowLevel[key] = value;
+        } else {
+            important[key] = value;
+        }
+    }
+
+    return { important, lowLevel };
+}
+
 function buildStructuredEventFields(evt) {
     if (!evt) return {};
     const ignored = new Set([
@@ -982,15 +1060,18 @@ function renderEventBrowserContent(evt, absoluteIndex, totalCount) {
 
     const fmt = formatEvent(evt);
     const recordId = evt.param1 != null ? evt.param1 : (evt.recordId != null ? evt.recordId : '');
-    const facts = [
+    const allArgs = fmt.args || [];
+    const primaryArgs = getPrimaryDecodedArguments(allArgs);
+    const facts = buildEventOverviewFacts(evt, allArgs);
+
+    const technicalFacts = [
         { label: 'Selection', value: `${absoluteIndex + 1} / ${totalCount}` },
-        { label: 'Name', value: fmt.name },
         { label: 'Sequence', value: evt.sequence, mono: true },
-        { label: 'Global ID', value: evt.pixGlobalId != null ? evt.pixGlobalId : '' },
+        { label: 'Global ID', value: evt.pixGlobalId != null ? evt.pixGlobalId : '', mono: true },
         { label: 'Visibility', value: evt.pixVisibility || '' },
-        { label: 'Opcode', value: evt.opcode, mono: true },
-        { label: 'Record ID', value: recordId, mono: true },
         { label: 'Block', value: evt.blockTypeName || '' },
+        { label: 'Record ID', value: recordId, mono: true },
+        { label: 'Opcode', value: evt.opcode, mono: true },
         { label: 'Payload Size', value: evt.dataSize != null ? evt.dataSize : '' },
     ];
 
@@ -1002,7 +1083,12 @@ function renderEventBrowserContent(evt, absoluteIndex, totalCount) {
         { label: 'Embedded Strings', value: evt.embeddedStrings && evt.embeddedStrings.length ? evt.embeddedStrings.join(' | ') : '' },
     ];
 
-    const structuredFields = buildStructuredEventFields(evt);
+    const structuredFieldGroups = buildEventStructuredFieldGroups(evt);
+    const hasExtraArgs = primaryArgs.length !== allArgs.length;
+    const hasImportantStructuredFields = Object.keys(structuredFieldGroups.important).length > 0;
+    const hasLowLevelStructuredFields = Object.keys(structuredFieldGroups.lowLevel).length > 0;
+    const hasRawFacts = rawFacts.some((item) => item && item.value != null && item.value !== '');
+    const hasNotes = Array.isArray(fmt.notes) && fmt.notes.length > 0;
 
     return `
         <div class="event-browser-inspector">
@@ -1014,9 +1100,15 @@ function renderEventBrowserContent(evt, absoluteIndex, totalCount) {
                 <span class="visibility-badge visibility-${escapeHtml(evt.pixVisibility || 'internal')}">${escapeHtml(evt.pixVisibility || 'internal')}</span>
             </div>
 
+            ${facts.length > 0 ? `
+                <section class="event-browser-section">
+                    <h4>Overview</h4>
+                    ${renderInspectorFacts(facts)}
+                </section>` : ''}
+
             <section class="event-browser-section">
-                <h4>Overview</h4>
-                ${renderInspectorFacts(facts)}
+                <h4>Function Parameters</h4>
+                ${renderInspectorArgTable(primaryArgs)}
             </section>
 
             <section class="event-browser-section">
@@ -1024,27 +1116,40 @@ function renderEventBrowserContent(evt, absoluteIndex, totalCount) {
                 <div class="event-call-block mono">${renderReferenceMarkup(fmt.call)}</div>
             </section>
 
-            <section class="event-browser-section">
-                <h4>Decoded Arguments</h4>
-                ${renderInspectorArgTable(fmt.args || [])}
-            </section>
+            ${hasImportantStructuredFields ? `
+                <section class="event-browser-section">
+                    <h4>Dependencies</h4>
+                    <div class="event-arg-body">${renderArgumentTreeValue(structuredFieldGroups.important, null, 0, 'structuredFields')}</div>
+                </section>` : ''}
 
-            <section class="event-browser-section">
-                <h4>Decoder Notes</h4>
-                ${renderInspectorList(fmt.notes || [])}
-            </section>
+            ${hasNotes ? `
+                <section class="event-browser-section">
+                    <h4>Decoder Notes</h4>
+                    ${renderInspectorList(fmt.notes || [])}
+                </section>` : ''}
 
-            <section class="event-browser-section">
-                <h4>Raw Metadata</h4>
-                ${renderInspectorFacts(rawFacts)}
-            </section>
+            ${hasExtraArgs ? `
+                <details class="event-browser-section">
+                    <summary>All Decoded Arguments</summary>
+                    ${renderInspectorArgTable(allArgs)}
+                </details>` : ''}
 
-            <section class="event-browser-section">
-                <h4>Structured Fields</h4>
-                ${Object.keys(structuredFields).length === 0
-                    ? '<div class="event-browser-empty">This event does not expose additional structured fields yet.</div>'
-                    : `<div class="event-arg-body">${renderArgumentTreeValue(structuredFields, null, 0, 'structuredFields')}</div>`}
-            </section>
+            <details class="event-browser-section">
+                <summary>Technical Details</summary>
+                ${renderInspectorFacts(technicalFacts)}
+            </details>
+
+            ${hasRawFacts ? `
+                <details class="event-browser-section">
+                    <summary>Raw Metadata</summary>
+                    ${renderInspectorFacts(rawFacts)}
+                </details>` : ''}
+
+            ${hasLowLevelStructuredFields ? `
+                <details class="event-browser-section">
+                    <summary>Low-Level Fields</summary>
+                    <div class="event-arg-body">${renderArgumentTreeValue(structuredFieldGroups.lowLevel, null, 0, 'structuredFields')}</div>
+                </details>` : ''}
 
             <details class="event-browser-section">
                 <summary>Raw Event JSON</summary>
@@ -1061,7 +1166,10 @@ function renderEventBrowserContent(evt, absoluteIndex, totalCount) {
                     metaParams: evt.metaParams || [],
                     coreMetaParams: evt.coreMetaParams || [],
                     payloadPreviewU32: evt.payloadPreviewU32 || [],
-                    structuredFields,
+                    structuredFields: {
+                        ...structuredFieldGroups.important,
+                        ...structuredFieldGroups.lowLevel,
+                    },
                 }, 'No raw event data.')}
             </details>
         </div>`;
@@ -1308,7 +1416,8 @@ function renderBlockMap(dir) {
         byType[key].totalDecomp += entry.decompSize;
     }
 
-    let html = '<table class="data-table"><thead><tr><th>Type</th><th>Name</th><th>Blocks</th><th>Compressed</th><th>Decompressed</th><th>Ratio</th></tr></thead><tbody>';
+    let html = '<div class="block-map-content">';
+    html += '<table class="data-table"><thead><tr><th>Type</th><th>Name</th><th>Blocks</th><th>Compressed</th><th>Decompressed</th><th>Ratio</th></tr></thead><tbody>';
     for (const key of Object.keys(byType).sort((a, b) => Number(a) - Number(b))) {
         const g = byType[key];
         const ratio = g.totalDecomp > 0 ? (g.totalComp / g.totalDecomp * 100).toFixed(1) : '-';
@@ -1331,6 +1440,7 @@ function renderBlockMap(dir) {
         const color = blockTypeColor(entry.dirType);
         html += `<div class="block-bar" style="height:${height}px;background:${color}" title="Block ${entry.index}: ${entry.dirTypeName} (${formatBytes(entry.compSize)})"></div>`;
     }
+    html += '</div>';
     html += '</div>';
 
     const container = $('#block-map');
